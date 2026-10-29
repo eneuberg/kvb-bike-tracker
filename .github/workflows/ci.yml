@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "data/**"
+      - "README.md"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt pytest
+      - run: python -m pytest -q
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t kvb-bike-tracker .
+      - name: Smoke test container against the live API
+        run: |
+          docker run -d --name t -p 8080:8080 -e UPDATE_INTERVAL_MINUTES=1 kvb-bike-tracker
+          for i in $(seq 1 30); do
+            if curl -fsS localhost:8080/latest.json -o latest.json; then break; fi
+            sleep 3
+          done
+          docker logs t
+          python3 -c "import json; d=json.load(open('latest.json')); c=d['meta']['counts']; print(c); assert c['total'] > 0"
+          curl -fsS -o /dev/null localhost:8080/map.png
+          curl -fsS -o /dev/null localhost:8080/heatmap.png
+          curl -fsS localhost:8080/history/runs.csv

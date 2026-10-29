@@ -1,0 +1,28 @@
+# Coolify: New Resource -> Docker Compose (from this repo). Set a domain for
+# the "tracker" service on port 8080. All variables below show up as editable
+# environment variables in Coolify.
+services:
+  tracker:
+    build: .
+    restart: unless-stopped
+    environment:
+      # How often to poll the nextbike API (minutes, fractions allowed, min 1)
+      - UPDATE_INTERVAL_MINUTES=${UPDATE_INTERVAL_MINUTES:-15}
+      # nextbike network id; "kg" = KVB-Rad Köln. Or pin one city via NEXTBIKE_CITY_ID
+      - NEXTBIKE_DOMAIN=${NEXTBIKE_DOMAIN:-kg}
+      - NEXTBIKE_CITY_ID=${NEXTBIKE_CITY_ID:-}
+      # A bike counts as "moved" if it shifts more than this many metres
+      - MOVE_THRESHOLD_M=${MOVE_THRESHOLD_M:-25}
+      # Render map.png / heatmap.png on every update (true/false)
+      - RENDER_PNG=${RENDER_PNG:-true}
+      - PORT=8080
+    volumes:
+      - tracker-data:/data
+    expose:
+      - "8080"
+    # For a plain `docker compose up` outside Coolify, uncomment:
+    # ports:
+    #   - "8080:8080"
+
+volumes:
+  tracker-data:
