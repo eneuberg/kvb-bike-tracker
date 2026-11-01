@@ -33,7 +33,11 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
+      # Always start from the newest main (not the SHA the run was queued with),
+      # otherwise a queued run appends to a stale copy of the history files.
       - uses: actions/checkout@v4
+        with:
+          ref: main
 
       - uses: actions/setup-python@v5
         with:
@@ -46,7 +50,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: data/tiles
-          key: tiles-${{ hashFiles('tracker/tiles.py') }}
+          key: tiles-${{ hashFiles('tracker/tiles.py', 'tracker/config.py') }}-key${{ secrets.TILE_API_KEY != '' }}
 
       - name: Fetch bikes, record history, render map
         env:
@@ -54,16 +58,30 @@ jobs:
         run: python -m tracker once --publish-history
 
       - name: Commit history
+        env:
+          TILE_API_KEY: ${{ secrets.TILE_API_KEY }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/history
-          if git diff --cached --quiet; then
-            echo "no history changes"; exit 0
-          fi
-          git commit -q -m "history: $(date -u +%Y-%m-%dT%H:%MZ)"
+          commit() {
+            git add data/history
+            git diff --cached --quiet && return 1
+            git commit -q -m "history: $(date -u +%Y-%m-%dT%H:%MZ)"
+          }
+          commit || { echo "no history changes"; exit 0; }
           for i in 1 2 3; do
-            git pull -q --rebase origin main && git push -q origin HEAD:main && exit 0
+            git fetch -q origin main
+            if git rebase -q origin/main; then
+              git push -q origin HEAD:main && exit 0
+            else
+              # Someone else appended to the same CSVs meanwhile: drop our
+              # commit, take their history and record a fresh poll on top.
+              echo "history conflict, re-recording on top of origin/main"
+              git rebase --abort
+              git reset -q --hard origin/main
+              python -m tracker once --publish-history
+              commit || exit 0
+            fi
             sleep $((i * 5))
           done
           echo "push failed after retries"; exit 1
