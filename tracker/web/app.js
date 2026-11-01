@@ -124,7 +124,8 @@
       styleReady = true;
       hasGlyphs = !!map.getStyle().glyphs;
       germanLabels();
-      $('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show');
+      // MapLibre opens the compact attribution on load; keep it as the (i) button
+      map.once('idle', () => $('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show'));
       setupLayers();
       boot();
     });
