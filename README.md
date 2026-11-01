@@ -2,7 +2,15 @@
 
 Tracks every KVB-Rad bike in Köln via the public nextbike live API. It draws a map of all bikes with per-bike metadata, adds a density heatmap, and keeps a full history of positions and changes.
 
-**Interactive map:** https://eneuberg.github.io/kvb-bike-tracker/. Click a bike or station for details, and toggle the heatmap in the panel.
+**Interactive map:** https://eneuberg.github.io/kvb-bike-tracker/
+
+| Mode | What it shows |
+|---|---|
+| **Live** | All bikes right now: stations (count = bikes docked), free-floating bikes, optional density layer. Tap a bike for details and "untouched since", tap a station for its typical fill level. Search by bike number, nearest bikes from your location. |
+| **Verlauf** | Scrub or play through the last 7 days (10-min steps). The curve behind the slider is the estimated number of bikes in use. "Weg anzeigen" draws where a single bike stood over the days. |
+| **Analyse** | *Verfügbarkeit*: chance of at least one bike in a 250 m cell / ~400 m radius, per hour, weekday vs. weekend. *Dichte*: average parked bikes per hour. *Nutzung*: bikes in use and trips by hour, trip duration and distance. *Ströme*: net in/outflow per cell and the most frequent connections by time of day. *Stationen*: chance a station is empty per hour. *Standzeit*: how long bikes stand untouched. |
+
+The map uses MapLibre GL with [OpenFreeMap](https://openfreemap.org) vector tiles (free, no key), so markers and heatmaps scale smoothly while zooming. It works on phones (bottom sheet) and desktop (side panel), in light and dark mode.
 
 ### Current bikes
 [![Current map of all KVB-Rad bikes](https://eneuberg.github.io/kvb-bike-tracker/map.png)](https://eneuberg.github.io/kvb-bike-tracker/)
@@ -71,7 +79,10 @@ In Coolify: **New Resource → Docker Compose → this repo**, assign a domain t
 | `NEXTBIKE_CITY_ID` | – | restrict to one nextbike city UID instead |
 | `MOVE_THRESHOLD_M` | `25` | movement threshold for `moved` events |
 | `RENDER_PNG` | `true` | render `map.png` / `heatmap.png` on each update |
-| `TILE_API_KEY` | – | free [CARTO basemap key](https://carto.com/basemaps/apikey); see *Basemap* below |
+| `TILE_API_KEY` | – | free [CARTO basemap key](https://carto.com/basemaps/apikey) for the PNG renders; see *Basemap* below |
+| `ANALYSIS_DAYS` | `56` | window for the statistics in *Analyse* |
+| `TIMELINE_DAYS` | `7` | how far back *Verlauf* goes |
+| `ANALYSIS_INTERVAL_MINUTES` | `30` | container only: recompute statistics at most this often |
 
 The container serves `/` (interactive map), `/map.png`, `/heatmap.png`, `/latest.json` (current state) and `/history/` (all CSVs).
 
@@ -95,5 +106,6 @@ The tests use a synthetic feed and need no network.
 
 - **Data source:** `api.nextbike.net/maps/nextbike-live.json`. It's public but undocumented, so nextbike can change it without notice. Use moderate poll intervals.
 - **Rentals are inferred:** the feed shows only parked bikes, not rides. "Trips" come from `gone` → `new` pairs and are therefore approximations.
-- **Basemap:** CARTO now requires a free API key ([request one](https://carto.com/basemaps/apikey)). With `TILE_API_KEY` set, the PNGs and the web map use CARTO light tiles (© OpenStreetMap contributors © CARTO; free up to 5M non-commercial requests/month). Without a key, the web map falls back to OpenStreetMap's standard tiles and the PNGs are drawn without a basemap. OSM's [tile policy](https://operations.osmfoundation.org/policies/tiles/) forbids pre-fetching tiles server-side. Note: the key is visible in the public web map's source, so restrict it in the CARTO dashboard if you can.
+- **Analysis method:** `tracker/analysis.py` replays the CSV history poll by poll. Trips are inferred: a bike leaves the feed and reappears ≥ 100 m away (absences over 4 h count as service), or jumps > 300 m between two polls. Rebalancing by van can't be separated reliably. Hours use Europe/Berlin local time; public holidays count as normal weekdays.
+- **Basemap:** CARTO now requires a free API key ([request one](https://carto.com/basemaps/apikey)). The interactive map uses OpenFreeMap. With `TILE_API_KEY` set, the PNG renders use CARTO light tiles (© OpenStreetMap contributors © CARTO; free up to 5M non-commercial requests/month). Without a key the PNGs are drawn without a basemap. OSM's [tile policy](https://operations.osmfoundation.org/policies/tiles/) forbids pre-fetching tiles server-side.
 - **Schedule:** in public repos, GitHub pauses scheduled workflows after 60 days without repo activity. The history commits should keep this repo active.

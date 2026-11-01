@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       preview:
-        description: "Also push map.png / heatmap.png to the 'preview' branch"
+        description: "Also take UI screenshots and push them to the 'preview' branch"
         type: boolean
         default: false
   push:
@@ -28,7 +28,7 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
@@ -86,12 +86,15 @@ jobs:
           done
           echo "push failed after retries"; exit 1
 
-      - name: Push preview images
+      - name: Screenshots + preview branch
         if: ${{ inputs.preview }}
         run: |
-          tmp=$(mktemp -d); cp data/site/map.png data/site/heatmap.png "$tmp"/
-          git checkout -q --orphan preview && git rm -rqf . && cp "$tmp"/*.png .
-          git add map.png heatmap.png && git commit -q -m "preview $(date -u +%FT%TZ)"
+          pip install -q playwright==1.49.1
+          python -m playwright install --with-deps chromium > /dev/null
+          python tools/screenshots.py data/site "$RUNNER_TEMP/shots"
+          cp data/site/map.png data/site/heatmap.png "$RUNNER_TEMP/shots"/
+          git checkout -q --orphan preview && git rm -rqf . && cp "$RUNNER_TEMP"/shots/*.png .
+          git add *.png && git commit -q -m "preview $(date -u +%FT%TZ)"
           git push -qf origin preview
 
       - uses: actions/configure-pages@v5

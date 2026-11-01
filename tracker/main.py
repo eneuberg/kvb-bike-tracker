@@ -18,14 +18,59 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import history, render
+from . import analysis, history, render
 from .config import Config
 from .fetch import FetchError, fetch_raw, normalize
 
 log = logging.getLogger("tracker")
 
 
-def run_once(cfg: Config) -> bool:
+class AnalysisState:
+    """Keeps the last analysis result between polls (serve mode)."""
+
+    def __init__(self):
+        self.last_run = 0.0
+        self.since: dict[str, list] = {}
+
+    def update(self, cfg: Config, force: bool = False) -> None:
+        if not force and time.monotonic() - self.last_run < cfg.analysis_interval_minutes * 60:
+            return
+        t0 = time.monotonic()
+        try:
+            res = analysis.analyze(cfg.history_dir, cfg.analysis_days, cfg.timeline_days,
+                                   int(cfg.timeline_step_minutes * 60))
+        except Exception:  # analysis must never break data collection
+            log.exception("analysis failed")
+            return
+        self.last_run = time.monotonic()
+        if not res:
+            return
+        render.write_json(cfg.site_dir / "analysis.json", res["analysis"])
+        render.write_json(cfg.site_dir / "timeline.json", res["timeline"])
+        self.since = res["since"]
+        log.info("analysis written in %.1fs", time.monotonic() - t0)
+
+    def attach_since(self, bikes: list[dict], now: int) -> None:
+        """Add 'since' (untouched since, epoch) to every bike, patching moves
+        that happened after the last full analysis."""
+        for b in bikes:
+            prev = self.since.get(b["bike"])
+            if prev is None:
+                self.since[b["bike"]] = prev = [now, False, b["lat"], b["lng"]]
+            elif len(prev) < 4:
+                prev += [b["lat"], b["lng"]]
+            elif history.haversine_m(prev[2], prev[3], b["lat"], b["lng"]) > analysis.IDLE_MOVE_M:
+                prev[:] = [now, False, b["lat"], b["lng"]]
+            b["since"], b["since_censored"] = prev[0], prev[1]
+        live = {b["bike"] for b in bikes}
+        for k in [k for k in self.since if k not in live]:
+            del self.since[k]  # rented / gone: touched, restart on return
+
+
+STATE = AnalysisState()
+
+
+def run_once(cfg: Config, force_analysis: bool = True) -> bool:
     started = datetime.now(timezone.utc)
     try:
         raw = fetch_raw(cfg)
@@ -37,6 +82,9 @@ def run_once(cfg: Config) -> bool:
         log.error("feed returned 0 bikes; not recording")
         return False
     counts = history.record(cfg, bikes, stations, meta, started)
+    cfg.site_dir.mkdir(parents=True, exist_ok=True)
+    STATE.update(cfg, force=force_analysis)
+    STATE.attach_since(bikes, int(started.timestamp()))
     render.write_site(cfg, bikes, stations, meta)
     write_history_index(cfg)
     c = meta["counts"]
@@ -126,7 +174,7 @@ def serve(cfg: Config) -> None:
         while not stop.is_set():
             t0 = time.monotonic()
             try:
-                run_once(cfg)
+                run_once(cfg, force_analysis=False)
             except Exception:  # keep the loop alive no matter what
                 log.exception("update failed")
             stop.wait(max(cfg.update_interval_seconds - (time.monotonic() - t0), 5))

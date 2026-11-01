@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#171c26" media="(prefers-color-scheme: dark)">
+<title>KVB-Rad Tracker</title>
+<meta name="description" content="Alle KVB-Räder in Köln live auf der Karte, mit Verlauf und Auswertungen.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600&family=Barlow:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.9.0/dist/maplibre-gl.css">
+<link rel="stylesheet" href="app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='9' cy='20' r='6' fill='none' stroke='%232a78d6' stroke-width='3'/%3E%3Ccircle cx='23' cy='20' r='6' fill='none' stroke='%23eb6834' stroke-width='3'/%3E%3C/svg%3E">
+</head>
+<body>
+<div id="map" aria-label="Karte der KVB-Räder"></div>
+
+<div class="map-tools" id="mapTools">
+  <button class="tool" id="btnLocate" type="button" aria-label="Mein Standort">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3"/><circle cx="12" cy="12" r="7.5"/></svg>
+  </button>
+  <button class="tool" id="btnHome" type="button" aria-label="Ganz Köln zeigen">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+  </button>
+</div>
+
+<aside id="panel" aria-label="Steuerung">
+  <div class="grab" id="grab" aria-hidden="true"><span></span></div>
+  <header class="head" id="head">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true"><circle cx="9" cy="19" r="6"/><circle cx="23" cy="19" r="6"/></svg>
+      <div class="brand-text">
+        <h1>KVB-Rad Tracker</h1>
+        <p id="status" class="status"><span class="pulse" aria-hidden="true"></span><span id="statusText">lädt …</span></p>
+      </div>
+    </div>
+    <nav class="modes" role="tablist" aria-label="Ansicht">
+      <button role="tab" data-mode="live" aria-selected="true">Live</button>
+      <button role="tab" data-mode="verlauf" aria-selected="false">Verlauf</button>
+      <button role="tab" data-mode="analyse" aria-selected="false">Analyse</button>
+    </nav>
+  </header>
+
+  <div class="scroll" id="scroll">
+    <!-- LIVE ----------------------------------------------------------- -->
+    <section class="mode" data-mode="live">
+      <div class="peek">
+        <div class="stats" id="liveStats">
+          <div class="stat"><b id="sTotal">–</b><span>Räder</span></div>
+          <div class="stat st"><b id="sStation">–</b><span>an Stationen</span></div>
+          <div class="stat fr"><b id="sFree">–</b><span>frei abgestellt</span></div>
+        </div>
+      </div>
+      <div class="detail" id="detail" hidden></div>
+      <div class="more">
+        <div class="block">
+          <h2>Ebenen</h2>
+          <div class="chips" id="liveLayers">
+            <button class="chip on" data-layer="stations" aria-pressed="true"><i class="sw st"></i>Stationen</button>
+            <button class="chip on" data-layer="free" aria-pressed="true"><i class="sw fr"></i>Freie Räder</button>
+            <button class="chip" data-layer="heat" aria-pressed="false"><i class="sw ht"></i>Dichte</button>
+          </div>
+        </div>
+        <div class="block">
+          <h2>Rad suchen</h2>
+          <form class="search" id="searchForm" autocomplete="off">
+            <input id="searchInput" inputmode="numeric" placeholder="Radnummer, z. B. 220031" aria-label="Radnummer">
+            <button type="submit">Finden</button>
+          </form>
+          <p class="hint" id="searchHint"></p>
+        </div>
+        <div class="block">
+          <h2>In deiner Nähe</h2>
+          <div id="near"><button class="btn-wide" id="btnNear" type="button">Standort verwenden</button>
+          <p class="hint">Zeigt die nächsten Räder und wie oft um diese Uhrzeit eins in der Nähe steht.</p></div>
+        </div>
+        <div class="block about">
+          <p>Daten: öffentliche Live-Schnittstelle von nextbike (KVB-Rad). Aktualisierung alle 15 Minuten. Räder in Benutzung sind im Feed nicht sichtbar.</p>
+          <p><a href="history/">Rohdaten (CSV)</a> <a id="repoLink" href="#">Quellcode</a></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- VERLAUF -------------------------------------------------------- -->
+    <section class="mode" data-mode="verlauf" hidden>
+      <div class="peek">
+        <div class="scrub" id="scrub">
+          <div class="scrub-top">
+            <button class="play" id="tlPlay" type="button" aria-label="Abspielen">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-play" d="M8 5.5v13l11-6.5z"/><path class="i-pause" d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>
+            </button>
+            <div class="clock"><b id="tlTime">--:--</b><span id="tlDate">–</span></div>
+            <button class="speed" id="tlSpeed" type="button" aria-label="Geschwindigkeit">1×</button>
+          </div>
+          <div class="track">
+            <svg id="tlSpark" class="spark" preserveAspectRatio="none" aria-hidden="true"></svg>
+            <input type="range" id="tlRange" min="0" max="0" value="0" step="1" aria-label="Zeitpunkt">
+          </div>
+          <div class="ticks" id="tlTicks" aria-hidden="true"></div>
+        </div>
+      </div>
+      <div class="detail" id="detailTl" hidden></div>
+      <div class="more">
+        <div class="block">
+          <div class="seg" id="tlSpan" role="radiogroup" aria-label="Zeitraum">
+            <button role="radio" data-h="24" aria-checked="false">24 h</button>
+            <button role="radio" data-h="72" aria-checked="false">3 Tage</button>
+            <button role="radio" data-h="168" aria-checked="true">7 Tage</button>
+          </div>
+        </div>
+        <div class="block">
+          <div class="stats small">
+            <div class="stat"><b id="tTotal">–</b><span>im Feed</span></div>
+            <div class="stat st"><b id="tStation">–</b><span>an Stationen</span></div>
+            <div class="stat fr"><b id="tFree">–</b><span>frei</span></div>
+            <div class="stat"><b id="tUse">–</b><span>unterwegs*</span></div>
+          </div>
+          <p class="hint">* geschätzt aus Rädern, die aus dem Feed verschwinden und woanders wieder auftauchen. Die Kurve über dem Regler zeigt diesen Wert.</p>
+        </div>
+        <div class="block">
+          <h2>Ebenen</h2>
+          <div class="chips" id="tlLayers">
+            <button class="chip on" data-layer="stations" aria-pressed="true"><i class="sw st"></i>Stationen</button>
+            <button class="chip on" data-layer="free" aria-pressed="true"><i class="sw fr"></i>Freie Räder</button>
+            <button class="chip" data-layer="heat" aria-pressed="false"><i class="sw ht"></i>Dichte</button>
+          </div>
+        </div>
+        <p class="hint">Tipp: Rad antippen und „Weg anzeigen“ wählen, um zu sehen, wo es in den letzten Tagen stand. Pfeiltasten springen einen Schritt.</p>
+      </div>
+    </section>
+
+    <!-- ANALYSE -------------------------------------------------------- -->
+    <section class="mode" data-mode="analyse" hidden>
+      <div class="peek">
+        <div class="tabs" id="aTabs" role="tablist" aria-label="Auswertung">
+          <button role="tab" data-tab="verfuegbarkeit" aria-selected="true">Verfügbarkeit</button>
+          <button role="tab" data-tab="dichte" aria-selected="false">Dichte</button>
+          <button role="tab" data-tab="nutzung" aria-selected="false">Nutzung</button>
+          <button role="tab" data-tab="stroeme" aria-selected="false">Ströme</button>
+          <button role="tab" data-tab="stationen" aria-selected="false">Stationen</button>
+          <button role="tab" data-tab="standzeit" aria-selected="false">Standzeit</button>
+        </div>
+        <div class="hourbar" id="hourBar">
+          <button class="play" id="hPlay" type="button" aria-label="Tagesverlauf abspielen">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-play" d="M8 5.5v13l11-6.5z"/><path class="i-pause" d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>
+          </button>
+          <div class="hour-main">
+            <div class="hour-label"><b id="hLabel">17 Uhr</b>
+              <div class="seg mini" id="dayType" role="radiogroup" aria-label="Wochentage">
+                <button role="radio" data-d="wd" aria-checked="true">Mo–Fr</button>
+                <button role="radio" data-d="we" aria-checked="false">Sa/So</button>
+                <button role="radio" data-d="all" aria-checked="false">Alle</button>
+              </div>
+            </div>
+            <input type="range" id="hRange" min="0" max="23" value="17" step="1" aria-label="Uhrzeit">
+            <div class="ticks hours" aria-hidden="true"><span>0</span><span>6</span><span>12</span><span>18</span><span>24</span></div>
+          </div>
+        </div>
+        <div class="seg" id="partBar" role="radiogroup" aria-label="Tageszeit" hidden>
+          <button role="radio" data-p="-1" aria-checked="true">Ganzer Tag</button>
+          <button role="radio" data-p="0" aria-checked="false">Morgen</button>
+          <button role="radio" data-p="1" aria-checked="false">Mittag</button>
+          <button role="radio" data-p="2" aria-checked="false">Abend</button>
+          <button role="radio" data-p="3" aria-checked="false">Nacht</button>
+        </div>
+        <div class="legend" id="aLegend"></div>
+      </div>
+      <div class="detail" id="detailA" hidden></div>
+      <div class="more" id="aMore"></div>
+    </section>
+  </div>
+</aside>
+
+<div class="tip" id="tip" role="tooltip" hidden></div>
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="https://unpkg.com/maplibre-gl@5.9.0/dist/maplibre-gl.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -87,3 +87,22 @@ def test_tile_config(monkeypatch):
     cfg = Config.from_env()
     assert cfg.tile_url.endswith("?key=abc") and cfg.web_tile_url == cfg.tile_url
     assert "CARTO" in cfg.tile_attribution
+
+
+def test_analysis_on_simulated_history(tmp_path):
+    from tracker.analysis import analyze
+
+    from .simulate import simulate
+
+    simulate(tmp_path / "history", days=1.5, step_min=30)
+    res = analyze(tmp_path / "history", analysis_days=56, timeline_days=7)
+    a, tl = res["analysis"], res["timeline"]
+    assert a["window"]["polls"] == 72
+    assert a["usage"]["totals"]["trips"] > 50
+    assert len(a["cells"]) > 100
+    assert sum(1 for v in a["n"]["wd"] + a["n"]["we"] if v) == 24  # every hour covered once or more
+    # timeline replays to the same bike count as the history
+    assert len(tl["t"]) == 72 and tl["total"][-1] > 0
+    first = tl["frames"][0]
+    assert len(first) // 4 == tl["total"][0]
+    assert res["since"]

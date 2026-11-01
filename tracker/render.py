@@ -140,100 +140,36 @@ def render_heatmap_png(cfg: Config, basemap: Basemap, bikes: list[dict[str, Any]
     img.convert("RGB").save(out, optimize=True)
 
 
-HTML_TEMPLATE = """<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>KVB-Rad bike tracker</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
-<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
-<style>
-  :root { --bg:#fff; --fg:#222; --panel:#ffffffee; --border:#ddd; }
-  @media (prefers-color-scheme: dark) { :root { --bg:#111; --fg:#eee; --panel:#1b1b1bee; --border:#333; } }
-  html, body { height:100%; margin:0; background:var(--bg); color:var(--fg);
-    font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
-  #map { position:absolute; inset:0; }
-  #panel { position:absolute; z-index:1000; top:10px; left:10px; max-width:calc(100vw - 20px);
-    background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:10px 14px; }
-  #panel h1 { font-size:16px; margin:0 0 4px; }
-  #panel .muted { opacity:.7; font-size:12px; }
-  #panel label { display:block; margin-top:6px; cursor:pointer; }
-  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; vertical-align:middle; }
-  .bike-marker { width:10px; height:10px; border-radius:50%; border:1.5px solid #fff; box-shadow:0 0 2px #0006; }
-  .station-marker { border-radius:50%; background:#1a73e8cc; border:2px solid #fff; color:#fff;
-    font-weight:600; display:flex; align-items:center; justify-content:center; box-shadow:0 0 3px #0006; }
-  .leaflet-popup-content { font-size:13px; } .leaflet-popup-content td { padding:1px 6px 1px 0; }
-</style>
-</head>
-<body>
-<div id="map"></div>
-<div id="panel">
-  <h1>KVB-Rad bike tracker</h1>
-  <div class="muted" id="status">loading…</div>
-  <label><input type="checkbox" id="chkStations" checked> <span class="dot" style="background:#1a73e8"></span>stations (number = bikes docked)</label>
-  <label><input type="checkbox" id="chkFree" checked> <span class="dot" style="background:#e85e1a"></span>free-floating bikes</label>
-  <label><input type="checkbox" id="chkHeat"> heatmap (all bikes)</label>
-  <div class="muted" style="margin-top:6px"><a href="history/" style="color:inherit">history</a> · <a href="https://github.com/eneuberg/kvb-bike-tracker" style="color:inherit">source</a></div>
-</div>
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
-<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
-<script>
-(async function () {
-  const map = L.map('map', { preferCanvas: true });
-  L.tileLayer('__TILE_URL__', { maxZoom: 19, attribution: '__ATTRIBUTION__' }).addTo(map);
+WEB_DIR = Path(__file__).parent / "web"
 
-  const res = await fetch('latest.json?ts=' + Date.now());
-  const data = await res.json();
-  const { bikes, stations, meta } = data;
-  const b = meta.bounds;
-  if (b) map.fitBounds([[b[0], b[1]], [b[2], b[3]]]); else map.setView([50.94, 6.96], 12);
 
-  const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-  const row = (k, v) => (v === null || v === undefined || v === '') ? '' : `<tr><td><b>${k}</b></td><td>${esc(v)}</td></tr>`;
-  const bikePopup = bk => `<table>${row('bike', bk.bike)}${row('type', bk.kind)}${row('station', bk.place_name)}
-    ${row('e-bike', bk.electric ? 'yes' : 'no')}${row('battery', bk.battery === null ? null : bk.battery + ' %')}
-    ${row('bike_type', bk.bike_type)}${row('state', bk.state)}${row('active', bk.active === null ? null : (bk.active ? 'yes' : 'no'))}
-    ${row('locks', bk.lock_types)}${row('lat/lng', bk.lat + ', ' + bk.lng)}</table>`;
+def copy_web(cfg: Config) -> list[Path]:
+    """Copy the static web app and write its runtime config."""
+    out = []
+    for src in sorted(WEB_DIR.iterdir()):
+        if src.is_file():
+            dst = cfg.site_dir / src.name
+            dst.write_bytes(src.read_bytes())
+            out.append(dst)
+    conf = {
+        "style_light": cfg.web_style_light,
+        "style_dark": cfg.web_style_dark,
+        "raster_url": cfg.web_tile_url,
+        "raster_attribution": cfg.web_tile_attribution,
+        "repo": "https://github.com/eneuberg/kvb-bike-tracker",
+    }
+    p = cfg.site_dir / "config.json"
+    p.write_text(json.dumps(conf, ensure_ascii=False), encoding="utf-8")
+    out.append(p)
+    return out
 
-  const stationLayer = L.layerGroup();
-  const byStation = {};
-  for (const bk of bikes) if (bk.kind === 'station') (byStation[bk.place_uid] ||= []).push(bk);
-  for (const st of stations) {
-    const docked = byStation[st.uid] || [];
-    const n = docked.length || st.bikes || 0;
-    const size = 18 + Math.min(Math.sqrt(n) * 4, 18);
-    const icon = L.divIcon({ className: '', html: `<div class="station-marker" style="width:${size}px;height:${size}px;font-size:${size > 26 ? 12 : 10}px">${n}</div>`, iconSize: [size, size] });
-    const list = docked.slice(0, 40).map(bk => `<li>${esc(bk.bike)}${bk.electric ? ' ⚡' + (bk.battery !== null ? bk.battery + '%' : '') : ''}</li>`).join('');
-    L.marker([st.lat, st.lng], { icon }).bindPopup(`<b>${esc(st.name)}</b><table>${row('bikes', n)}
-      ${row('available', st.bikes_available_to_rent)}${row('racks', st.bike_racks)}${row('free racks', st.free_racks)}
-      ${row('terminal', st.terminal_type)}</table>${list ? '<ul style="margin:4px 0;padding-left:18px;max-height:160px;overflow:auto">' + list + '</ul>' : ''}`).addTo(stationLayer);
-  }
 
-  const freeLayer = L.markerClusterGroup({ disableClusteringAtZoom: 15, maxClusterRadius: 40, chunkedLoading: true });
-  for (const bk of bikes) {
-    if (bk.kind === 'station') continue;
-    const low = bk.battery !== null && bk.battery < 20;
-    const icon = L.divIcon({ className: '', html: `<div class="bike-marker" style="background:${low ? '#a01e1e' : '#e85e1a'}"></div>`, iconSize: [10, 10] });
-    L.marker([bk.lat, bk.lng], { icon }).bindPopup(bikePopup(bk)).addTo(freeLayer);
-  }
-
-  const heatLayer = L.heatLayer(bikes.map(bk => [bk.lat, bk.lng, 1]), { radius: 22, blur: 18, maxZoom: 15, minOpacity: 0.25 });
-
-  stationLayer.addTo(map); freeLayer.addTo(map);
-  const bind = (id, layer) => document.getElementById(id).addEventListener('change', e => e.target.checked ? map.addLayer(layer) : map.removeLayer(layer));
-  bind('chkStations', stationLayer); bind('chkFree', freeLayer); bind('chkHeat', heatLayer);
-
-  const c = meta.counts;
-  document.getElementById('status').textContent =
-    `${c.total} bikes · ${c.station} at ${c.stations} stations · ${c.free + c.other} free-floating · ${c.electric} e-bikes · updated ${meta.ts}`;
-})().catch(err => { document.getElementById('status').textContent = 'failed to load data: ' + err; });
-</script>
-</body>
-</html>
-"""
+def write_json(path: Path, data: Any) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)  # atomic, so the server never serves half a file
+    return path
 
 
 def write_site(cfg: Config, bikes: list[dict[str, Any]], stations: list[dict[str, Any]],
@@ -242,17 +178,9 @@ def write_site(cfg: Config, bikes: list[dict[str, Any]], stations: list[dict[str
     site.mkdir(parents=True, exist_ok=True)
     written = []
 
-    latest = site / "latest.json"
-    latest.write_text(json.dumps({"meta": meta, "bikes": bikes, "stations": stations},
-                                 separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
-    written.append(latest)
+    written.append(write_json(site / "latest.json", {"meta": meta, "bikes": bikes, "stations": stations}))
 
-    html = (HTML_TEMPLATE
-            .replace("__TILE_URL__", cfg.web_tile_url.replace("'", "%27"))
-            .replace("__ATTRIBUTION__", cfg.web_tile_attribution.replace("'", "\\'")))
-    index = site / "index.html"
-    index.write_text(html, encoding="utf-8")
-    written.append(index)
+    written += copy_web(cfg)
 
     if cfg.render_png and meta.get("bounds"):
         try:

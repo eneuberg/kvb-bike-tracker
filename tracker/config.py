@@ -79,11 +79,19 @@ class Config:
     tile_api_key: str | None = None
     tile_url: str = ""              # server-side PNG basemap; "" = none
     tile_attribution: str = ""
-    web_tile_url: str = ""          # browser map
+    web_style_light: str = "https://tiles.openfreemap.org/styles/positron"
+    web_style_dark: str = "https://tiles.openfreemap.org/styles/dark"
+    web_tile_url: str = ""          # raster fallback for the browser map
     web_tile_attribution: str = ""
     image_width: int = 1400
     render_png: bool = True
     publish_history_days: int = 31  # static site only: days of history copied into Pages
+
+    # Analysis
+    analysis_days: float = 56         # window for availability / usage statistics
+    timeline_days: float = 7          # how far back the timeline scrubber goes
+    timeline_step_minutes: float = 10 # min spacing of timeline frames
+    analysis_interval_minutes: float = 30  # serve mode: recompute at most this often
 
     # Server
     port: int = 8080
@@ -113,5 +121,11 @@ class Config:
             image_width=int(_env("IMAGE_WIDTH", "1400")),
             render_png=_env("RENDER_PNG", "true").lower() not in ("0", "false", "no"),
             publish_history_days=int(_env("PUBLISH_HISTORY_DAYS", "31")),
+            web_style_light=_env("WEB_STYLE_LIGHT", cls.web_style_light),
+            web_style_dark=_env("WEB_STYLE_DARK", cls.web_style_dark),
+            analysis_days=float(_env("ANALYSIS_DAYS", "56")),
+            timeline_days=float(_env("TIMELINE_DAYS", "7")),
+            timeline_step_minutes=float(_env("TIMELINE_STEP_MINUTES", "10")),
+            analysis_interval_minutes=float(_env("ANALYSIS_INTERVAL_MINUTES", "30")),
             port=int(_env("PORT", "8080")),
         )
