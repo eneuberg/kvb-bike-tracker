@@ -117,7 +117,8 @@ h3 { font: 600 15px/1.3 var(--font); margin: 0 0 4px; }
 
 /* stats */
 .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
-.stats.small { grid-template-columns: repeat(4, 1fr); }
+.stats.small { grid-template-columns: repeat(2, 1fr); }
+@media (min-width: 460px) { .stats.small { grid-template-columns: repeat(4, 1fr); } }
 .stat { background: var(--surface-2); border-radius: var(--r-md); padding: 8px 10px 7px; min-width: 0; }
 .stat b { display: block; font: 600 26px/1.05 var(--font-c); font-variant-numeric: tabular-nums; letter-spacing: .2px; }
 .stats.small .stat b { font-size: 21px; }
@@ -145,6 +146,7 @@ h3 { font: 600 15px/1.3 var(--font); margin: 0 0 4px; }
 .search button, .btn-wide, .btn { border: 0; border-radius: var(--r-md); background: var(--ink); color: var(--surface);
   padding: 9px 16px; font-weight: 600; min-height: 40px; }
 .btn-wide { width: 100%; }
+a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .btn.ghost { background: var(--surface-3); color: var(--ink); }
 .btn.sm { min-height: 34px; padding: 6px 12px; font-size: 14px; }
 

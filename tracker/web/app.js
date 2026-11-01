@@ -123,9 +123,23 @@
       if (styleReady) return;
       styleReady = true;
       hasGlyphs = !!map.getStyle().glyphs;
+      germanLabels();
+      $('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show');
       setupLayers();
       boot();
     });
+  }
+
+  // Basemap labels in German where OSM has a German name ("Köln", not "Cologne").
+  function germanLabels() {
+    for (const l of map.getStyle().layers) {
+      if (l.type !== 'symbol') continue;
+      const tf = map.getLayoutProperty(l.id, 'text-field');
+      if (!tf) continue;
+      const str = JSON.stringify(tf);
+      if (!/name/.test(str) || /ref|housenumber/.test(str)) continue;
+      map.setLayoutProperty(l.id, 'text-field', ['coalesce', ['get', 'name:de'], ['get', 'name']]);
+    }
   }
 
   const EMPTY = { type: 'FeatureCollection', features: [] };
@@ -854,7 +868,8 @@
     const note = warn ? 'Das ist noch sehr wenig: Werte schwanken stark und manche Stunden fehlen noch.'
       : days < 14 ? 'Einzelne Tage wiegen noch schwer. Ab etwa zwei Wochen werden die Muster stabil.' : '';
     const icon = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.5"/></svg>';
-    return `<div class="basis${warn ? ' warn' : ''}">${icon}<div>Grundlage: ${nf.format(w.polls)} Abfragen über ${nf1.format(days)} ${days === 1 ? 'Tag' : 'Tage'}
+    const spanTxt = days < 1 ? fmtDur(days * 86400) : `${nf1.format(days)} ${days === 1 ? 'Tag' : 'Tage'}`;
+    return `<div class="basis${warn ? ' warn' : ''}">${icon}<div>Grundlage: ${nf.format(w.polls)} Abfragen über ${spanTxt}
       (${fDM.format(new Date(w.from * 1000))} bis ${fDM.format(new Date(w.to * 1000))}). ${note}</div></div>`;
   }
 
@@ -936,7 +951,7 @@
     $('#aMore').innerHTML = `${basisBox()}
       <div class="block"><p class="hint" style="margin-top:0">Wo stehen um diese Uhrzeit typischerweise die meisten Räder? Gemittelt über alle Abfragen dieser Stunde. Im Vergleich der Stunden siehst du, wie sich die Flotte über den Tag verlagert.</p></div>
       <div class="block"><h2>Top-Bereiche um ${S.hour} Uhr</h2><ul class="rows">${topCells('avg').map((x) => `
-        <li><button class="rowbtn" data-act="cell" data-j="${x.j}"><span class="main"><b>${esc(x.name)}</b><small>Feld bei ${esc(x.near)}</small></span>
+        <li><button class="rowbtn" data-act="cell" data-j="${x.j}"><span class="main"><b>${esc(x.name)}</b><small>250-m-Feld an der nächsten Station</small></span>
         <span class="val">${nf1.format(x.v)}<small>Räder Ø</small></span></button></li>`).join('')}</ul></div>`;
   }
 
@@ -1407,7 +1422,9 @@
     await liveReady;
     renderLive();
     setMode(S.mode, { sheet: 'peek' });
-    requestAnimationFrame(() => map.fitBounds(KOELN, { duration: 0, padding: isDesktop()
+    const bb = S.live?.meta?.bounds;
+    const view = bb ? [[bb[1], bb[0]], [bb[3], bb[2]]] : KOELN;
+    requestAnimationFrame(() => map.fitBounds(view, { duration: 0, padding: isDesktop()
       ? { left: 440, top: 30, right: 30, bottom: 30 } : { top: 20, left: 12, right: 12, bottom: sheetVisibleHeight() + 8 } }));
   }
 
