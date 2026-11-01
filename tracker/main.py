@@ -37,18 +37,23 @@ class AnalysisState:
             return
         t0 = time.monotonic()
         try:
-            res = analysis.analyze(cfg.history_dir, cfg.analysis_days, cfg.timeline_days,
-                                   int(cfg.timeline_step_minutes * 60))
-        except Exception:  # analysis must never break data collection
-            log.exception("analysis failed")
+            res = analysis.export(cfg.history_dir, cfg.analysis_days, int(cfg.timeline_step_minutes * 60))
+        except Exception:  # must never break data collection
+            log.exception("history export failed")
             return
         self.last_run = time.monotonic()
         if not res:
             return
-        render.write_json(cfg.site_dir / "analysis.json", res["analysis"])
-        render.write_json(cfg.site_dir / "timeline.json", res["timeline"])
+        tl = cfg.site_dir / "tl"
+        for date, day in res["days"].items():
+            render.write_json(tl / f"{date}.json", day)
+        render.write_json(tl / "index.json", res["index"])
+        keep = {f"{d}.json" for d in res["days"]} | {"index.json"}
+        for old in tl.glob("*.json"):
+            if old.name not in keep:
+                old.unlink()
         self.since = res["since"]
-        log.info("analysis written in %.1fs", time.monotonic() - t0)
+        log.info("history export written in %.1fs", time.monotonic() - t0)
 
     def attach_since(self, bikes: list[dict], now: int) -> None:
         """Add 'since' (untouched since, epoch) to every bike, patching moves

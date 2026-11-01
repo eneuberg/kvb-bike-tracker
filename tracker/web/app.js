@@ -72,9 +72,9 @@
   const t0 = now();
   const S = {
     mode: 'live', tab: 'verfuegbarkeit', hour: localHour(t0), day: isWeekend(t0) ? 'we' : 'wd',
-    radius: 'near', part: -1,
+    f: null, tlEnd: null, raster: null, stList: null, wPlaying: false,
     layers: { live: { stations: true, free: true, heat: false }, verlauf: { stations: true, free: true, heat: false } },
-    live: null, tl: null, an: null, frame: 0, span: 168, playing: false, speed: 1, hPlaying: false,
+    live: null, tl: null, frame: -1, span: 168, playing: false, speed: 1,
     sel: null, me: null, trail: null, cfg: null,
   };
 
@@ -148,26 +148,27 @@
 
   function setupLayers() {
     const before = map.getStyle().layers.find((l) => l.type === 'symbol')?.id;
-    for (const id of ['bikes', 'stations', 'cellpts', 'net', 'idle', 'sel', 'me', 'trail', 'anst'])
+    for (const id of ['bikes', 'stations', 'netc', 'idle', 'sel', 'me', 'trail', 'anst', 'qpt'])
       map.addSource(id, { type: 'geojson', data: EMPTY });
-    map.addSource('cells', { type: 'geojson', data: EMPTY, tolerance: 0 });
     map.addSource('flows', { type: 'geojson', data: EMPTY, lineMetrics: true });
+    map.addSource('raster', { type: 'image', url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+      coordinates: [[6.76, 51.09], [7.18, 51.09], [7.18, 50.83], [6.76, 50.83]] });
 
     // under basemap labels
-    map.addLayer({ id: 'cells-fill', type: 'fill', source: 'cells', layout: { visibility: 'none' },
-      paint: { 'fill-color': R.seq[0], 'fill-opacity': 0.7, 'fill-antialias': false } }, before);
-    map.addLayer({ id: 'cells-line', type: 'line', source: 'cells', layout: { visibility: 'none' },
-      paint: { 'line-color': css('--surface'), 'line-width': ['interpolate', ['linear'], ['zoom'], 11, 0, 13, 0.6, 16, 1.5], 'line-opacity': 0.85 } }, before);
-    map.addLayer({ id: 'net-fill', type: 'fill', source: 'net', layout: { visibility: 'none' },
-      paint: { 'fill-color': ['interpolate', ['linear'], ['get', 'v'], -1, R.div.neg[0], -0.5, R.div.neg[1], -0.15, R.div.neg[2],
-        0, R.div.mid, 0.15, R.div.pos[0], 0.5, R.div.pos[1], 1, R.div.pos[2]],
-        'fill-opacity': ['interpolate', ['linear'], ['get', 'n'], 2, 0.35, 20, 0.8], 'fill-antialias': false } }, before);
-    map.addLayer({ id: 'net-line', type: 'line', source: 'net', layout: { visibility: 'none' },
-      paint: { 'line-color': css('--surface'), 'line-width': ['interpolate', ['linear'], ['zoom'], 11, 0, 13, 0.6, 16, 1.5] } }, before);
-    map.addLayer({ id: 'dens-heat', type: 'heatmap', source: 'cellpts', layout: { visibility: 'none' },
-      paint: heatPaint(['/', ['max', 0, ['get', 'h0']], 4], 1.3) }, before);
+    map.addLayer({ id: 'raster-l', type: 'raster', source: 'raster', layout: { visibility: 'none' },
+      paint: { 'raster-resampling': 'linear', 'raster-opacity': 0.9, 'raster-fade-duration': 0 } }, before);
     map.addLayer({ id: 'live-heat', type: 'heatmap', source: 'bikes', layout: { visibility: 'none' },
       paint: heatPaint(1, 1) }, before);
+    map.addLayer({ id: 'qpt-fill', type: 'fill', source: 'qpt', filter: ['==', ['geometry-type'], 'Polygon'], layout: { visibility: 'none' },
+      paint: { 'fill-color': hexA(C.ink, 0.06) } }, before);
+    map.addLayer({ id: 'qpt-line', type: 'line', source: 'qpt', filter: ['==', ['geometry-type'], 'Polygon'], layout: { visibility: 'none' },
+      paint: { 'line-color': C.ink, 'line-width': 1.6, 'line-dasharray': [2, 2] } });
+    map.addLayer({ id: 'qpt-dot', type: 'circle', source: 'qpt', filter: ['==', ['geometry-type'], 'Point'], layout: { visibility: 'none' },
+      paint: { 'circle-radius': 6, 'circle-color': C.ink, 'circle-stroke-color': C.surface, 'circle-stroke-width': 2.5 } });
+    map.addLayer({ id: 'netc', type: 'circle', source: 'netc', layout: { visibility: 'none' },
+      paint: { 'circle-radius': ['interpolate', ['exponential', 1.6], ['zoom'], 10, ['*', ['get', 'rel'], 14], 14, ['*', ['get', 'rel'], 44]],
+        'circle-color': ['interpolate', ['linear'], ['get', 'v'], -1, R.div.neg[0], -0.5, R.div.neg[1], -0.15, R.div.neg[2], 0, R.div.mid, 0.15, R.div.pos[0], 0.5, R.div.pos[1], 1, R.div.pos[2]],
+        'circle-opacity': 0.85, 'circle-stroke-color': C.surface, 'circle-stroke-width': 1 } });
 
     // on top
     map.addLayer({ id: 'flows-line', type: 'line', source: 'flows', layout: { visibility: 'none', 'line-cap': 'round' },
@@ -198,7 +199,10 @@
         paint: { 'text-color': ['case', ['==', ['get', 'n'], 0], C.station, '#ffffff'] } });
     }
     map.addLayer({ id: 'an-st', type: 'circle', source: 'anst', layout: { visibility: 'none' },
-      paint: { 'circle-radius': 6, 'circle-color': R.red[2], 'circle-stroke-color': C.surface, 'circle-stroke-width': 1.2 } });
+      paint: { 'circle-radius': ['interpolate', ['exponential', 1.6], ['zoom'], 10, ['+', 2.5, ['*', 0.8, ['sqrt', ['get', 'a']]]],
+          14, ['+', 6, ['*', 2.4, ['sqrt', ['get', 'a']]]], 18, ['+', 12, ['*', 4, ['sqrt', ['get', 'a']]]]],
+        'circle-color': ['interpolate', ['linear'], ['get', 'p'], 0, R.red[0], 25, R.red[1], 50, R.red[2], 75, R.red[3], 100, R.red[4]],
+        'circle-stroke-color': C.surface, 'circle-stroke-width': 1.2 } });
     map.addLayer({ id: 'sel-ring', type: 'circle', source: 'sel', filter: ['==', ['geometry-type'], 'Point'],
       paint: { 'circle-radius': zoomRadius(9, 15, 24), 'circle-color': 'rgba(0,0,0,0)', 'circle-stroke-color': C.ink, 'circle-stroke-width': 2.5 } });
     map.addLayer({ id: 'sel-cell', type: 'line', source: 'sel', filter: ['==', ['geometry-type'], 'Polygon'],
@@ -213,7 +217,11 @@
       let raf = 0;
       map.on('mousemove', (e) => {
         if (raf) return;
-        raf = requestAnimationFrame(() => { raf = 0; map.getCanvas().style.cursor = pick(e.point) ? 'pointer' : ''; });
+        raf = requestAnimationFrame(() => {
+          raf = 0;
+          const anyPoint = S.mode === 'analyse' && (S.tab === 'verfuegbarkeit' || S.tab === 'dichte');
+          map.getCanvas().style.cursor = anyPoint ? 'crosshair' : pick(e.point) ? 'pointer' : '';
+        });
       });
     }
   }
@@ -250,28 +258,22 @@
     vis('trail-line', m === 'verlauf' && !!S.trail);
     vis('trail-pts', m === 'verlauf' && !!S.trail);
     const a = m === 'analyse';
-    vis('cells-fill', a && t === 'verfuegbarkeit');
-    vis('cells-line', a && t === 'verfuegbarkeit');
-    vis('dens-heat', a && t === 'dichte');
-    vis('net-fill', a && t === 'stroeme');
-    vis('net-line', a && t === 'stroeme');
+    vis('raster-l', a && (t === 'verfuegbarkeit' || t === 'dichte'));
+    const q = a && S.sel?.type === 'point' && (t === 'verfuegbarkeit' || t === 'dichte');
+    vis('qpt-fill', q); vis('qpt-line', q); vis('qpt-dot', q);
+    vis('netc', a && t === 'stroeme');
     vis('flows-line', a && t === 'stroeme');
     vis('an-st', a && t === 'stationen');
     vis('idle-dots', a && t === 'standzeit');
   }
 
   // ---------------------------------------------------------------- picking
-  const PRIORITY = ['stations-c', 'an-st', 'free-dots', 'idle-dots', 'trail-pts', 'cells-fill', 'net-fill'];
+  const PRIORITY = ['stations-c', 'an-st', 'free-dots', 'idle-dots', 'trail-pts', 'netc'];
   function pick(pt) {
     const layers = PRIORITY.filter(isVis);
     if (!layers.length) return null;
     const r = isDesktop() ? 6 : 14;
-    const pointLayers = layers.filter((l) => !l.endsWith('-fill'));
-    let fs = pointLayers.length ? map.queryRenderedFeatures([[pt.x - r, pt.y - r], [pt.x + r, pt.y + r]], { layers: pointLayers }) : [];
-    if (!fs.length) {
-      const fills = layers.filter((l) => l.endsWith('-fill'));
-      fs = fills.length ? map.queryRenderedFeatures(pt, { layers: fills }) : [];
-    }
+    const fs = map.queryRenderedFeatures([[pt.x - r, pt.y - r], [pt.x + r, pt.y + r]], { layers });
     if (!fs.length) return null;
     const rank = (f) => PRIORITY.indexOf(f.layer.id);
     const dist = (f) => {
@@ -284,6 +286,9 @@
   }
 
   function onMapClick(e) {
+    if (S.mode === 'analyse' && (S.tab === 'verfuegbarkeit' || S.tab === 'dichte')) {
+      pointQuery(e.lngLat.lng, e.lngLat.lat); applyVisibility(); return;
+    }
     const f = pick(e.point);
     if (!f) { closeDetail(); return; }
     const p = f.properties;
@@ -292,9 +297,8 @@
       case 'free-dots': S.mode === 'verlauf' ? showTlBike(p.i) : showBike(p.id); break;
       case 'idle-dots': showBike(p.id); break;
       case 'trail-pts': showTrail(); break;
-      case 'cells-fill': showCell(p.j); break;
-      case 'net-fill': showNetCell(p.c); break;
-      case 'an-st': showAnStation(p.j); break;
+      case 'netc': showNetCell(p, f.geometry.coordinates); break;
+      case 'an-st': stationQuery(p.uid); break;
       default:
     }
   }
@@ -383,7 +387,7 @@
   // ---------------------------------------------------------------- modes
   function setMode(mode, opts = {}) {
     if (S.mode === 'verlauf' && mode !== 'verlauf') stopPlay();
-    if (S.mode === 'analyse' && mode !== 'analyse') stopHourPlay();
+    if (S.mode === 'analyse' && mode !== 'analyse') stopWindowPlay();
     S.mode = mode;
     for (const b of $$('.modes button')) b.setAttribute('aria-selected', String(b.dataset.mode === mode));
     for (const s of $$('section.mode')) s.hidden = s.dataset.mode !== mode;
@@ -509,13 +513,7 @@
       <div class="actions"><a class="btn sm" href="https://www.google.com/maps/dir/?api=1&destination=${st.lat},${st.lng}&travelmode=walking" target="_blank" rel="noopener">Route hierhin</a></div>`);
     select({ type: 'Point', coordinates: [st.lng, st.lat] });
     flyTo([st.lng, st.lat]);
-    ensureAnalysis().then(() => {
-      const el = $('#stHist');
-      if (!el) return;
-      const j = S.an?.stIndex.get(String(uid));
-      el.innerHTML = j == null ? '<p class="hint">Noch keine Auswertung für diese Station.</p>' : stationCharts(j);
-      bindCharts(el);
-    }).catch(() => { const el = $('#stHist'); if (el) el.innerHTML = ''; });
+    stationQuery(String(uid), true, '#stHist').catch(() => { const el = $('#stHist'); if (el) el.innerHTML = ''; });
   }
 
   // ---------------------------------------------------------------- near me
@@ -556,40 +554,77 @@
           <span class="main"><b>${esc(x.st.name)}</b><small>${x.n} ${x.n === 1 ? 'Rad' : 'Räder'} an der Station</small></span>
           <span class="val">${fmtDist(x.d)}<small>~${Math.max(1, Math.round(x.d / 75))} Min. zu Fuß</small></span></button></li>`).join('')}</ul>
       <button class="btn sm ghost" id="btnNear2" type="button" style="margin-top:8px">Standort aktualisieren</button>`;
-    ensureAnalysis().then(() => {
-      const el = $('#nearChance');
-      const A = S.an;
-      if (!el || !A) return;
-      const j = A.cellIndex.get(A.cellOf(lat, lng));
-      const day = isWeekend(now()) ? 'we' : 'wd';
-      const h = localHour(now());
-      const v = j == null ? 0 : A.val('near', day, h, j);
-      if (v == null) { el.textContent = ''; return; }
-      el.textContent = `${dayLabel(day)} um ${h} Uhr stand hier in ${v} % der Fälle mindestens ein Rad im Umkreis von etwa 400 m (Basis: ${nf1.format(A.window.days)} Tage).`;
-    }).catch(() => {});
+    $('#nearChance').innerHTML = '<button class="btn sm ghost" data-act="pointme" type="button">Wie oft steht hier ein Rad?</button>';
+  }
+
+  // ---------------------------------------------------------------- history index + worker
+  let tlIndex = null, tlIndexAt = 0;
+  async function ensureIndex() {
+    if (tlIndex && now() - tlIndexAt < 600) return tlIndex;
+    tlIndex = (await getJSON('tl/index.json')).days;
+    tlIndexAt = now();
+    return tlIndex;
+  }
+  const lastDate = () => tlIndex[tlIndex.length - 1].date;
+  const firstDate = () => tlIndex[0].date;
+  const addDays = (date, n) => { const d = new Date(`${date}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+  const fmtD = (date) => `${date.slice(8, 10)}.${date.slice(5, 7)}.`;
+
+  let worker = null, rid = 0;
+  const pending = new Map();
+  function rpc(op, args) {
+    if (!worker) {
+      worker = new Worker('worker.js');
+      worker.onmessage = (e) => { const p = pending.get(e.data.id); pending.delete(e.data.id); if (p) (e.data.ok ? p.res(e.data.res) : p.rej(new Error(e.data.err))); };
+      worker.postMessage({ id: 0, op: 'init', args: { base: new URL('.', location.href).href } });
+    }
+    return new Promise((res, rej) => { const id = ++rid; pending.set(id, { res, rej }); worker.postMessage({ id, op, args }); });
   }
 
   // ---------------------------------------------------------------- timeline
   const KEY = 12;
   async function ensureTimeline() {
-    if (S.tl && now() - S.tl.loaded < 600) return S.tl;
-    const T = await getJSON('timeline.json');
-    const N = T.bikes.length;
-    const state = { p: new Uint8Array(N), la: new Int32Array(N), lo: new Int32Array(N), pl: new Int32Array(N).fill(-1) };
-    const keys = [];
-    const apply = (st, i) => {
-      const f = T.frames[i];
-      for (let k = 0; k < f.length; k += 4) { const b = f[k]; st.p[b] = 1; st.la[b] = f[k + 1]; st.lo[b] = f[k + 2]; st.pl[b] = f[k + 3]; }
-      for (const b of T.gone[i]) st.p[b] = 0;
-    };
-    for (let i = 0; i < T.t.length; i++) {
-      apply(state, i);
-      if (i % KEY === 0) keys.push({ p: state.p.slice(), la: state.la.slice(), lo: state.lo.slice(), pl: state.pl.slice() });
+    const idx = await ensureIndex();
+    const end = S.tlEnd && S.tlEnd <= lastDate() ? S.tlEnd : lastDate();
+    const nDays = Math.ceil(S.span / 24) + (S.span <= 24 ? 1 : 0);
+    const dates = idx.map((d) => d.date).filter((d) => d <= end && d > addDays(end, -nDays - 1));
+    const key = dates.join(',');
+    if (S.tl && S.tl.key === key && now() - S.tl.loaded < 600) return S.tl;
+    const files = await Promise.all(dates.map((d) => getJSON(`tl/${d}.json`)));
+    // merge days into one global-index timeline; a day starts with a full snapshot
+    const bIdx = new Map(), bikes = [], sIdx = new Map(), stations = [];
+    const t = [], frames = [], gone = [], reset = [];
+    for (const d of files) {
+      const bm = d.bikes.map((id) => { let g = bIdx.get(id); if (g == null) { g = bikes.length; bIdx.set(id, g); bikes.push(id); } return g; });
+      const sm = d.stations.map((s) => { let g = sIdx.get(s[0]); if (g == null) { g = stations.length; sIdx.set(s[0], g); stations.push(s); } return g; });
+      d.t.forEach((tt, i) => {
+        const f = d.frames[i], a = new Int32Array(f.length);
+        for (let k = 0; k < f.length; k += 4) { a[k] = bm[f[k]]; a[k + 1] = f[k + 1]; a[k + 2] = f[k + 2]; a[k + 3] = f[k + 3] >= 0 ? sm[f[k + 3]] : -1; }
+        t.push(tt); frames.push(a); gone.push(d.gone[i].map((b) => bm[b])); reset.push(i === 0);
+      });
     }
-    T.keys = keys; T.apply = apply; T.N = N; T.loaded = now();
-    T.cur = { p: new Uint8Array(N), la: new Int32Array(N), lo: new Int32Array(N), pl: new Int32Array(N), i: -1 };
-    T.bikeIndex = new Map(T.bikes.map((b, i) => [b, i]));
+    const T = { key, dates, t, frames, gone, reset, bikes, stations, bikeIndex: bIdx, N: bikes.length,
+      lat0: files[0]?.lat0 ?? 50, lng0: files[0]?.lng0 ?? 6, scale: files[0]?.scale ?? 1e5, loaded: now(), inuse: null };
+    const st = () => ({ p: new Uint8Array(T.N), la: new Int32Array(T.N), lo: new Int32Array(T.N), pl: new Int32Array(T.N).fill(-1) });
+    T.apply = (s, i) => {
+      if (T.reset[i]) s.p.fill(0);
+      const f = T.frames[i];
+      for (let k = 0; k < f.length; k += 4) { const b = f[k]; s.p[b] = 1; s.la[b] = f[k + 1]; s.lo[b] = f[k + 2]; s.pl[b] = f[k + 3]; }
+      for (const b of T.gone[i]) s.p[b] = 0;
+    };
+    const s = st();
+    T.keys = [];
+    for (let i = 0; i < t.length; i++) { T.apply(s, i); if (i % KEY === 0) T.keys.push({ p: s.p.slice(), la: s.la.slice(), lo: s.lo.slice(), pl: s.pl.slice() }); }
+    T.cur = { ...st(), i: -1 };
     S.tl = T;
+    S.frame = -1;
+    // bikes in use for the sparkline, computed in the worker
+    rpc('inuseSeries', { dates, P: tripParams() }).then((r) => {
+      if (S.tl !== T) return;
+      const m = new Map(r.t.map((x, k) => [x, r.inuse[k]]));
+      T.inuse = T.t.map((x) => m.get(x) ?? 0);
+      if (S.mode === 'verlauf') { setupScrubber(); renderFrame(); }
+    }).catch(() => {});
     return T;
   }
 
@@ -613,7 +648,7 @@
     tlRaf = requestAnimationFrame(() => {
       tlRaf = 0;
       const T = S.tl;
-      if (!T || !T.t.length) return;
+      if (!T || !T.t.length || S.frame < 0) return;
       seek(S.frame);
       const cur = T.cur, sc = T.scale;
       const bikes = [], counts = new Int32Array(T.stations.length);
@@ -634,15 +669,14 @@
       $('#tTotal').textContent = nf.format(bikes.length);
       $('#tStation').textContent = nf.format(docked);
       $('#tFree').textContent = nf.format(free);
-      $('#tUse').textContent = nf.format(T.inuse[S.frame] ?? 0);
+      $('#tUse').textContent = T.inuse ? nf.format(T.inuse[S.frame] ?? 0) : '…';
       $('#tlRange').setAttribute('aria-valuetext', `${fDate.format(new Date(t * 1000))} ${fTime.format(new Date(t * 1000))}`);
     });
   }
 
   function spanStart() {
     const T = S.tl, tEnd = T.t[T.t.length - 1];
-    let i0 = T.t.findIndex((t) => t >= tEnd - S.span * 3600);
-    return Math.max(0, i0);
+    return Math.max(0, T.t.findIndex((t) => t >= tEnd - S.span * 3600));
   }
 
   function setupScrubber() {
@@ -651,9 +685,9 @@
     r.min = i0; r.max = i1;
     if (S.frame < i0 || S.frame > i1) S.frame = i1;
     r.value = S.frame;
-    // sparkline of bikes in use
     const svg = $('#tlSpark');
-    const n = i1 - i0 + 1, vals = T.inuse.slice(i0, i1 + 1);
+    const n = i1 - i0 + 1;
+    const vals = (T.inuse || T.t.map(() => 0)).slice(i0, i1 + 1);
     const max = Math.max(5, ...vals);
     const ts = T.t[i0], te = T.t[i1], span = Math.max(1, te - ts);
     const X = (t) => ((t - ts) / span) * 1000;
@@ -661,17 +695,16 @@
     let d = '';
     for (let k = 0; k < n; k++) d += `${k ? 'L' : 'M'}${X(T.t[i0 + k]).toFixed(1)},${Y(vals[k]).toFixed(1)}`;
     svg.setAttribute('viewBox', '0 0 1000 52');
-    const days = [];
-    const ticks = [];
-    // local midnights in range
+    const days = [], ticks = [];
     for (let t = ts - (ts % 3600); t <= te; t += 3600) {
       const h = localHour(t);
       if (h === 0 && t > ts) days.push(t);
       if (S.span <= 24 ? h % 6 === 0 : (S.span <= 72 ? h === 12 || h === 0 : h === 12)) ticks.push(t);
     }
     svg.innerHTML = `${days.map((t) => `<line class="day" x1="${X(t)}" x2="${X(t)}" y1="0" y2="52"/>`).join('')}
-      ${n > 1 ? `<path class="area" d="${d}L1000,52L0,52Z"/><path class="ln" d="${d}"/>` : ''}`;
-    $('#tlTicks').innerHTML = ticks.map((t) => {
+      ${n > 1 && T.inuse ? `<path class="area" d="${d}L1000,52L0,52Z"/><path class="ln" d="${d}"/>` : ''}`;
+    const every = S.span > 200 ? 2 : 1;
+    $('#tlTicks').innerHTML = ticks.filter((_, k) => k % every === 0).map((t) => {
       const lab = S.span <= 24 ? `${localHour(t)} Uhr` : (localHour(t) === 0 ? fDM.format(new Date(t * 1000)) : fDay.format(new Date(t * 1000)));
       const x = X(t) / 10;
       return x > 4 && x < 96 ? `<span style="left:${x}%">${lab}</span>` : '';
@@ -680,16 +713,20 @@
   }
 
   async function enterTimeline(opts = {}) {
+    $('#tlTime').textContent = '--:--';
     try {
-      $('#tlTime').textContent = '--:--';
       await ensureTimeline();
     } catch (err) {
+      console.warn(err);
       toast('Verlauf noch nicht verfügbar. Er entsteht mit den nächsten Abfragen.');
       return;
     }
-    if (!S.tl.t.length) { toast('Noch keine Verlaufsdaten.'); return; }
+    const T = S.tl;
+    if (!T.t.length) { toast('Noch keine Verlaufsdaten.'); return; }
+    const end = $('#tlEnd');
+    end.min = firstDate(); end.max = lastDate(); end.value = S.tlEnd || lastDate();
     if (opts.frameAt) S.frame = nearestFrame(opts.frameAt);
-    else if (S.frame <= 0) S.frame = S.tl.t.length - 1;
+    else if (S.frame < 0) S.frame = T.t.length - 1;
     setupScrubber();
     applyVisibility();
     updateStatus();
@@ -747,8 +784,7 @@
     if (S.mode !== 'verlauf') { setMode('verlauf', { trail: id }); return; }
     const T = await ensureTimeline();
     const i = T.bikeIndex.get(String(id));
-    if (i == null) { toast(`Rad ${id} kommt im Verlauf nicht vor.`); return; }
-    // walk all frames once and collect stays
+    if (i == null) { toast(`Rad ${id} kommt im gewählten Zeitraum nicht vor.`); return; }
     const stays = [];
     let present = false, last = null;
     for (let f = 0; f < T.t.length; f++) {
@@ -757,13 +793,13 @@
       for (let k = 0; k < fr.length; k += 4) if (fr[k] === i) { hit = k; break; }
       if (hit >= 0) {
         const lat = T.lat0 + fr[hit + 1] / T.scale, lng = T.lng0 + fr[hit + 2] / T.scale, pl = fr[hit + 3];
-        if (last && present && hav(last.lat, last.lng, lat, lng) < 60 && last.pl === pl) { last.t1 = T.t[f]; }
+        if (last && present && hav(last.lat, last.lng, lat, lng) < 60 && last.pl === pl) last.t1 = T.t[f];
         else { last = { lat, lng, pl, t0: T.t[f], t1: T.t[f] }; stays.push(last); }
         present = true;
-      } else if (T.gone[f].includes(i)) { present = false; }
+      } else if (T.reset[f] || T.gone[f].includes(i)) { present = false; }
       else if (present && last) last.t1 = T.t[f];
     }
-    if (!stays.length) { toast(`Rad ${id} kommt im Verlauf nicht vor.`); return; }
+    if (!stays.length) { toast(`Rad ${id} kommt im gewählten Zeitraum nicht vor.`); return; }
     S.trail = { id, stays };
     setData('trail', { type: 'FeatureCollection', features: [
       { type: 'Feature', geometry: { type: 'LineString', coordinates: stays.map((s) => [s.lng, s.lat]) }, properties: {} },
@@ -779,366 +815,403 @@
   function showTrail() {
     const tr = S.trail; if (!tr) return;
     const T = S.tl;
-    const name = (s) => s.pl >= 0 ? esc(T.stations[s.pl][1]) : 'frei abgestellt';
-    const rows = tr.stays.slice().reverse().slice(0, 40).map((s) => `
+    const name = (s) => (s.pl >= 0 ? esc(T.stations[s.pl][1]) : 'frei abgestellt');
+    const rows = tr.stays.slice().reverse().slice(0, 60).map((s) => `
       <li><button class="rowbtn" data-act="frame" data-t="${s.t0}"><span class="dot" style="background:${s.pl >= 0 ? C.station : C.free}"></span>
         <span class="main"><b>${name(s)}</b><small>${fDate.format(new Date(s.t0 * 1000))} ${fTime.format(new Date(s.t0 * 1000))} bis ${s.t1 === s.t0 ? '–' : fTime.format(new Date(s.t1 * 1000))}</small></span>
         <span class="val">${fmtDur(Math.max(600, s.t1 - s.t0))}</span></button></li>`).join('');
     showDetail('#detailTl', `
-      <p class="kicker">Weg in den letzten ${Math.round((T.t[T.t.length - 1] - T.t[0]) / 86400) || 1} Tagen</p>
+      <p class="kicker">Weg im gewählten Zeitraum</p>
       <h3>Rad ${esc(tr.id)}</h3>
       <p class="hint" style="margin-top:0">${tr.stays.length} Standorte. Antippen springt zum Zeitpunkt.</p>
       <ul class="rows">${rows}</ul>
       <div class="actions"><button class="btn sm ghost" data-act="cleartrail">Weg ausblenden</button></div>`, { keepSel: true });
   }
 
-  // ---------------------------------------------------------------- analysis
-  let anPromise = null;
-  function ensureAnalysis() {
-    if (S.an && now() - S.an.loaded < 900) return Promise.resolve(S.an);
-    if (anPromise) return anPromise;
-    anPromise = getJSON('analysis.json').then((A) => {
-      const dec = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
-      for (const m of ['prob', 'near', 'avg']) for (const d of ['wd', 'we']) A[m][d] = dec(A[m][d]);
-      const G = A.grid, N = A.cells.length;
-      A.N = N;
-      A.cellIndex = new Map(A.cells.map((c, j) => [c, j]));
-      A.cellOf = (lat, lng) => {
-        const ix = Math.floor((lng - G.lng0) / G.dlng), iy = Math.floor((lat - G.lat0) / G.dlat);
-        return (ix < 0 || iy < 0 || ix >= G.W || iy >= G.H) ? -1 : iy * G.W + ix;
-      };
-      A.cellPoly = (c) => {
-        const iy = Math.floor(c / G.W), ix = c % G.W;
-        const a = G.lat0 + iy * G.dlat, b = G.lng0 + ix * G.dlng;
-        return [[[b, a], [b + G.dlng, a], [b + G.dlng, a + G.dlat], [b, a + G.dlat], [b, a]]];
-      };
-      A.cellCenter = (c) => { const iy = Math.floor(c / G.W), ix = c % G.W; return [G.lng0 + (ix + 0.5) * G.dlng, G.lat0 + (iy + 0.5) * G.dlat]; };
-      const CW = Math.ceil(G.W / G.coarse);
-      A.coarseCenter = (c) => { const cy = Math.floor(c / CW), cx = c % CW;
-        return [G.lng0 + (cx * G.coarse + G.coarse / 2) * G.dlng, G.lat0 + (cy * G.coarse + G.coarse / 2) * G.dlat]; };
-      // value of metric for day type (wd/we/all), hour, cell j; null = no data
-      A.val = (m, d, h, j) => {
-        const sc = m === 'avg' ? 10 : 1;
-        if (d !== 'all') { const v = A[m][d][h * N + j]; return v === 255 ? null : v / sc; }
-        const a = A[m].wd[h * N + j], b = A[m].we[h * N + j], na = A.n.wd[h], nb = A.n.we[h];
-        const wa = a === 255 ? 0 : na, wb = b === 255 ? 0 : nb;
-        if (!wa && !wb) return null;
-        return ((wa ? a * wa : 0) + (wb ? b * wb : 0)) / (wa + wb) / sc;
-      };
-      A.combine = (wd, we, h) => {
-        if (S.day !== 'all') return (S.day === 'wd' ? wd : we)[h];
-        const a = wd[h], b = we[h], na = A.n.wd[h], nb = A.n.we[h];
-        const wa = a == null ? 0 : na, wb = b == null ? 0 : nb;
-        return (!wa && !wb) ? null : ((wa ? a * wa : 0) + (wb ? b * wb : 0)) / (wa + wb);
-      };
-      A.stIndex = new Map(A.stations.uid.map((u, j) => [String(u), j]));
-      A.loaded = now();
-      S.an = A;
-      A.stamp = (A.stamp || 0) + 1;
-      return A;
-    }).finally(() => { anPromise = null; });
-    return anPromise;
+  // ---------------------------------------------------------------- analysis filters
+  const WD_NAMES = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
+  const DEFAULT_F = () => {
+    const h = localHour(now());
+    return { range: 14, from: null, to: null, wd: isWeekend(now()) ? [0, 0, 0, 0, 0, 1, 1] : [1, 1, 1, 1, 1, 0, 0],
+      a: h * 4, b: ((h + 1) % 24) * 4 || 96, kind: 'all', R: 400, res: 100, smooth: 150,
+      minGone: 100, jump: 300, maxDurH: 4, cell: 1000, top: 40, min: 2, k: 0, idleMin: 0 };
+  };
+  function loadFilter() {
+    try { const s = JSON.parse(localStorage.getItem('kvb-filter') || 'null'); if (s && Array.isArray(s.wd)) return { ...DEFAULT_F(), ...s }; } catch { /* ignore */ }
+    return DEFAULT_F();
   }
+  function saveFilter() { try { localStorage.setItem('kvb-filter', JSON.stringify(S.f)); } catch { /* ignore */ } }
 
-  const TAB_CONTROLS = {
-    verfuegbarkeit: 'hour', dichte: 'hour', nutzung: 'none', stroeme: 'part', stationen: 'hour', standzeit: 'none',
+  const minToStr = (m) => `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+  const winMin = () => ({ t0: S.f.a * 15, t1: (S.f.b * 15) % 1440 });
+  const winLabel = () => {
+    const { a, b } = S.f;
+    if (a === b || (a === 0 && b === 96) || (a === 96 && b === 0)) return 'ganzer Tag';
+    return `${minToStr(a * 15)}–${b === 96 ? '24:00' : minToStr(b * 15)}`;
+  };
+  const wdLabel = (wd = S.f.wd) => {
+    const on = wd.map(Boolean);
+    const key = on.map((x) => (x ? 1 : 0)).join('');
+    if (key === '1111111') return 'alle Tage';
+    if (key === '1111100') return 'Mo–Fr';
+    if (key === '0000011') return 'Sa/So';
+    if (key === '0000000') return 'keine Tage';
+    return WD_NAMES.filter((_, i) => on[i]).join(', ');
+  };
+  function filterDates() {
+    const idx = tlIndex || [];
+    if (!idx.length) return { from: '', to: '', dates: [] };
+    let from, to;
+    if (S.f.range === 'custom' && S.f.from && S.f.to) { from = S.f.from; to = S.f.to; }
+    else if (S.f.range === 'all') { from = firstDate(); to = lastDate(); }
+    else { to = lastDate(); from = addDays(to, -(+S.f.range - 1)); }
+    if (from > to) [from, to] = [to, from];
+    return { from, to, dates: idx.map((d) => d.date).filter((d) => d >= from && d <= to) };
+  }
+  function F() {
+    const { from, to } = filterDates();
+    const { t0, t1 } = winMin();
+    return { from, to, wd: S.f.wd.map(Boolean), t0, t1, kind: S.f.kind };
+  }
+  const tripParams = () => ({ minGone: S.f?.minGone ?? 100, jump: S.f?.jump ?? 300, maxDur: (S.f?.maxDurH ?? 4) * 3600 });
+  const rangeLabel = () => { const { from, to } = filterDates(); return from ? `${fmtD(from)}–${fmtD(to)}` : ''; };
+  const PARAM_LABEL = {
+    verfuegbarkeit: () => `Umkreis ${S.f.R} m`, dichte: () => `Glättung ${S.f.smooth} m`, nutzung: () => `ab ${S.f.minGone} m`,
+    stroeme: () => `Raster ${fmtDist(S.f.cell)}`, stationen: () => `leer = höchstens ${S.f.k}`, standzeit: () => (S.f.idleMin ? `ab ${S.f.idleMin} Tagen` : 'alle Räder'),
   };
 
+  function syncFilterUI() {
+    const { a, b } = S.f;
+    $('#wA').value = a; $('#wB').value = b;
+    $('#wLabel').textContent = winLabel();
+    $('#wDays').textContent = wdLabel();
+    // fill between handles; wraps when start is after end
+    const fill = $('#wFill'), pa = (a / 96) * 100, pb = (b / 96) * 100;
+    const inset = 'calc(12px + (100% - 24px) * ';
+    if (a <= b) { fill.style.left = `${inset}${pa / 100})`; fill.style.width = `calc((100% - 24px) * ${(pb - pa) / 100})`; fill.style.background = ''; }
+    else {
+      fill.style.left = '12px'; fill.style.width = 'calc(100% - 24px)';
+      fill.style.background = `linear-gradient(90deg, var(--ink) ${pb}%, transparent ${pb}%, transparent ${pa}%, var(--ink) ${pa}%)`;
+    }
+    const isIdle = S.tab === 'standzeit';
+    $('#timeBar').hidden = isIdle;
+    $('#fSumText').textContent = isIdle ? PARAM_LABEL.standzeit() : `${wdLabel()}, ${rangeLabel()}, ${PARAM_LABEL[S.tab]()}`;
+    $('#wA').setAttribute('aria-valuetext', minToStr(a * 15));
+    $('#wB').setAttribute('aria-valuetext', b === 96 ? '24:00' : minToStr(b * 15));
+  }
+
+  function slider(id, label, min, max, step, val, fmt) {
+    return `<div class="row"><h3><label for="${id}">${label}</label><output id="${id}-o">${fmt(val)}</output></h3>
+      <input class="slider" type="range" id="${id}" min="${min}" max="${max}" step="${step}" value="${val}" data-param="${id.replace('p-', '')}"></div>`;
+  }
+  function kindSeg() {
+    return `<div class="row"><h3>Welche Räder</h3><div class="seg" role="radiogroup" data-seg="kind">
+      ${[['all', 'Alle'], ['free', 'Frei abgestellt'], ['station', 'An Stationen']].map(([v, l]) => `<button role="radio" data-v="${v}" aria-checked="${S.f.kind === v}">${l}</button>`).join('')}</div></div>`;
+  }
+  const FMT = {
+    R: (v) => `${v} m`, res: (v) => `${v} m`, smooth: (v) => (+v ? `${v} m` : 'aus'), minGone: (v) => `${v} m`, jump: (v) => `${v} m`,
+    maxDurH: (v) => `${nf1.format(v)} h`, cell: (v) => fmtDist(+v), top: (v) => `${v}`, min: (v) => `${v}`, k: (v) => (+v ? `höchstens ${v} ${+v === 1 ? 'Rad' : 'Räder'}` : 'kein Rad'),
+    idleMin: (v) => (+v ? `${v} ${+v === 1 ? 'Tag' : 'Tage'}` : 'alle'),
+  };
+  function tabParams() {
+    const f = S.f;
+    switch (S.tab) {
+      case 'verfuegbarkeit': return slider('p-R', 'Umkreis', 50, 1000, 50, f.R, FMT.R) + kindSeg()
+        + slider('p-res', 'Kartenauflösung', 50, 300, 50, f.res, FMT.res);
+      case 'dichte': return slider('p-smooth', 'Glättung', 0, 400, 25, f.smooth, FMT.smooth) + kindSeg()
+        + slider('p-res', 'Kartenauflösung', 50, 300, 50, f.res, FMT.res);
+      case 'nutzung': return tripSliders();
+      case 'stroeme': return slider('p-cell', 'Rastergröße für Start und Ziel', 250, 3000, 250, f.cell, FMT.cell)
+        + slider('p-top', 'Anzahl Verbindungen', 5, 150, 5, f.top, FMT.top) + slider('p-min', 'Mindestens Fahrten je Verbindung', 1, 30, 1, f.min, FMT.min) + tripSliders();
+      case 'stationen': return slider('p-k', 'Als „leer“ gilt', 0, 5, 1, f.k, FMT.k);
+      case 'standzeit': return slider('p-idleMin', 'Mindestens unbewegt seit', 0, 14, 1, f.idleMin, FMT.idleMin) + kindSeg();
+      default: return '';
+    }
+  }
+  function tripSliders() {
+    const f = S.f;
+    return `<p class="hint" style="margin:12px 0 0">So werden Fahrten aus dem Feed geschätzt:</p>`
+      + slider('p-minGone', 'Rad verschwindet und taucht mindestens so weit entfernt wieder auf', 50, 1000, 50, f.minGone, FMT.minGone)
+      + slider('p-jump', 'oder springt zwischen zwei Abfragen weiter als', 100, 2000, 100, f.jump, FMT.jump)
+      + slider('p-maxDurH', 'Länger weg zählt als Werkstatt oder Umverteilung', 0.5, 12, 0.5, f.maxDurH, FMT.maxDurH);
+  }
+
+  function filterBlock() {
+    const { from, to } = filterDates();
+    const min = tlIndex.length ? firstDate() : '', max = tlIndex.length ? lastDate() : '';
+    const common = S.tab === 'standzeit' ? '' : `
+      <div class="row"><h3>Zeitraum</h3>
+        <div class="seg" role="radiogroup" data-seg="range">
+          ${[[7, '7 Tage'], [14, '14 Tage'], [28, '28 Tage'], ['all', 'Alles']].map(([v, l]) => `<button role="radio" data-v="${v}" aria-checked="${String(S.f.range) === String(v)}">${l}</button>`).join('')}
+        </div>
+        <div class="dates">
+          <label class="field">von <input type="date" id="fFrom" value="${from}" min="${min}" max="${max}"></label>
+          <label class="field">bis <input type="date" id="fTo" value="${to}" min="${min}" max="${max}"></label>
+        </div></div>
+      <div class="row"><h3>Wochentage</h3>
+        <div class="wdays">${WD_NAMES.map((n, i) => `<button type="button" data-wd="${i}" aria-pressed="${!!S.f.wd[i]}">${n}</button>`).join('')}</div>
+        <div class="quick"><button data-wdp="1111100">Mo–Fr</button><button data-wdp="0000011">Sa/So</button><button data-wdp="1111111">Alle</button></div></div>
+      <div class="row"><h3>Uhrzeit</h3><p class="hint" style="margin:0 0 4px">Mit den beiden Reglern oben. Liegt der Beginn hinter dem Ende, geht das Fenster über Mitternacht.</p>
+        <div class="quick">${[['ganzer Tag', 0, 96], ['Morgen 6–10', 24, 40], ['Mittag 10–16', 40, 64], ['Abend 16–20', 64, 80], ['Nacht 20–6', 80, 24]]
+          .map(([l, a, b]) => `<button data-win="${a},${b}">${l}</button>`).join('')}</div></div>`;
+    return `<div class="block filters" id="filters">${common}${tabParams()}</div>`;
+  }
+
+  // ---------------------------------------------------------------- analysis
+  const RAMP = {
+    avail: (DARK ? ['#1b2a42', '#184f95', '#3987e5', '#86b6ef', '#e6f0fd'] : ['#cde2fb', '#86b6ef', '#3987e5', '#1c5cab', '#0d366b']),
+    dens: R.heat.slice(1),
+  };
+  const toStops = (cols, a0, a1) => cols.map((c, k) => {
+    const n = parseInt(c.slice(1), 16), f = k / (cols.length - 1);
+    return [f, (n >> 16) & 255, (n >> 8) & 255, n & 255, a0 + (a1 - a0) * f];
+  });
+
+  let anSeq = 0, anTimer = 0;
   async function enterAnalysis() {
     for (const b of $$('#aTabs button')) b.setAttribute('aria-selected', String(b.dataset.tab === S.tab));
-    const ctl = TAB_CONTROLS[S.tab];
-    $('#hourBar').hidden = ctl !== 'hour';
-    $('#partBar').hidden = ctl !== 'part';
-    syncHourUI();
     applyVisibility();
-    $('#aMore').innerHTML = '<p class="hint">Auswertung wird geladen …</p>';
     $('#aLegend').innerHTML = '';
-    try { await ensureAnalysis(); } catch (err) {
-      $('#aMore').innerHTML = '<div class="basis warn">Noch keine Auswertung vorhanden. Sie entsteht automatisch, sobald ein paar Abfragen gelaufen sind.</div>';
+    try { await ensureIndex(); } catch {
+      $('#aMore').innerHTML = '<div class="basis warn">Noch keine Verlaufsdaten vorhanden. Sie entstehen automatisch mit den nächsten Abfragen.</div>';
       return;
     }
     if (S.mode !== 'analyse') return;
-    renderTab();
+    syncFilterUI();
+    renderAnalysisBody();
+    compute();
+  }
+
+  function renderAnalysisBody() {
+    $('#aMore').innerHTML = `${filterBlock()}<div class="block" id="aOut"><span class="busy">rechnet …</span></div>`;
+    bindFilterInputs();
     requestAnimationFrame(() => setSheet(sheetState));
   }
 
-  function basisBox() {
-    const A = S.an, w = A.window;
-    const days = w.days;
-    const warn = days < 3;
-    const note = warn ? 'Das ist noch sehr wenig: Werte schwanken stark und manche Stunden fehlen noch.'
-      : days < 14 ? 'Einzelne Tage wiegen noch schwer. Ab etwa zwei Wochen werden die Muster stabil.' : '';
-    const icon = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.5"/></svg>';
-    const spanTxt = days < 1 ? fmtDur(days * 86400) : `${nf1.format(days)} ${days === 1 ? 'Tag' : 'Tage'}`;
-    return `<div class="basis${warn ? ' warn' : ''}">${icon}<div>Grundlage: ${nf.format(w.polls)} Abfragen über ${spanTxt}
-      (${fDM.format(new Date(w.from * 1000))} bis ${fDM.format(new Date(w.to * 1000))}). ${note}</div></div>`;
+  function scheduleCompute(delay = 120) {
+    clearTimeout(anTimer);
+    anTimer = setTimeout(compute, delay);
+    const l = $('#aLegend .top .busy');
+    if (!l && $('#aLegend .top')) $('#aLegend .top').insertAdjacentHTML('beforeend', '<span class="busy">rechnet …</span>');
   }
 
-  function renderTab() {
-    if (!S.an || !styleReady) return;
-    const fn = { verfuegbarkeit: renderAvail, dichte: renderDensity, nutzung: renderUsage, stroeme: renderFlows,
-      stationen: renderStations, standzeit: renderIdle }[S.tab];
-    fn();
-    bindCharts($('#aMore'));
-  }
-
-  // ---- availability & density
-  let cellKey = '';
-  function buildCells(metric) {
-    const A = S.an, key = `${metric}|${S.day}|${A.stamp}`;
-    if (key === cellKey) return;
-    cellKey = key;
-    const polys = [], pts = [];
-    for (let j = 0; j < A.N; j++) {
-      const props = { j };
-      let any = false;
-      for (let h = 0; h < 24; h++) {
-        const v = A.val(metric, S.day, h, j);
-        props[`h${h}`] = v == null ? -1 : v;
-        if (v) any = true;
+  async function compute() {
+    if (S.mode !== 'analyse') return;
+    const seq = ++anSeq;
+    const { dates } = filterDates();
+    const f = F();
+    const out = () => $('#aOut');
+    try {
+      if (S.tab === 'standzeit') { renderIdle(); return; }
+      if (!dates.length) { out().innerHTML = '<p class="hint">Im gewählten Zeitraum gibt es keine Daten.</p>'; return; }
+      if (!f.wd.some(Boolean)) { out().innerHTML = '<p class="hint">Bitte mindestens einen Wochentag wählen.</p>'; return; }
+      let r;
+      switch (S.tab) {
+        case 'verfuegbarkeit':
+          r = await rpc('avail', { F: f, dates, R: S.f.R, res: S.f.res, stops: toStops(RAMP.avail, 0.25, 0.85) });
+          if (seq !== anSeq) return;
+          showRaster(r); S.raster = r; renderAvailOut(r); break;
+        case 'dichte':
+          r = await rpc('density', { F: f, dates, res: S.f.res, smooth: S.f.smooth, stops: toStops(RAMP.dens, 0.2, 0.9) });
+          if (seq !== anSeq) return;
+          showRaster(r); S.raster = r; renderDensOut(r); break;
+        case 'nutzung':
+          r = await rpc('usage', { F: f, dates, P: tripParams() });
+          if (seq !== anSeq) return;
+          renderUsageOut(r); break;
+        case 'stroeme':
+          r = await rpc('flows', { F: f, dates, P: tripParams(), cell: S.f.cell, top: S.f.top, min: S.f.min });
+          if (seq !== anSeq) return;
+          renderFlowsOut(r); break;
+        case 'stationen':
+          r = await rpc('stations', { F: f, dates, k: S.f.k });
+          if (seq !== anSeq) return;
+          renderStationsOut(r); break;
+        default:
       }
-      if (metric === 'avg') {
-        if (any) pts.push({ type: 'Feature', geometry: { type: 'Point', coordinates: A.cellCenter(A.cells[j]) }, properties: props });
-      } else polys.push({ type: 'Feature', geometry: { type: 'Polygon', coordinates: A.cellPoly(A.cells[j]) }, properties: props });
+      if (S.sel?.type === 'point') pointQuery(S.sel.lng, S.sel.lat, true);
+      if (S.sel?.type === 'station') stationQuery(S.sel.uid, true);
+    } catch (err) {
+      console.error(err);
+      if (seq === anSeq) out().innerHTML = `<div class="basis warn">Die Auswertung ist fehlgeschlagen: ${esc(err.message.split('\n')[0])}</div>`;
     }
-    if (metric === 'avg') setData('cellpts', { type: 'FeatureCollection', features: pts });
-    else setData('cells', { type: 'FeatureCollection', features: polys });
   }
 
-  function paintHour() {
-    if (!S.an || !styleReady) return;
-    const hk = ['get', `h${S.hour}`];
-    if (S.tab === 'verfuegbarkeit') {
-      map.setPaintProperty('cells-fill', 'fill-color', ['case', ['<', hk, 0], 'rgba(0,0,0,0)',
-        ['interpolate', ['linear'], hk, 0, R.seq[0], 25, R.seq[1], 50, R.seq[2], 75, R.seq[3], 100, R.seq[4]]]);
-      map.setPaintProperty('cells-fill', 'fill-opacity', ['case', ['<', hk, 0], 0,
-        ['interpolate', ['linear'], hk, 0, 0.18, 10, 0.5, 100, 0.8]]);
-    } else if (S.tab === 'dichte') {
-      map.setPaintProperty('dens-heat', 'heatmap-weight', ['/', ['max', 0, hk], 4]);
-    } else if (S.tab === 'stationen') {
-      const ek = ['get', `e${S.hour}`], ak = ['get', `a${S.hour}`];
-      map.setPaintProperty('an-st', 'circle-color', ['case', ['<', ek, 0], C.muted,
-        ['interpolate', ['linear'], ek, 0, R.red[0], 25, R.red[1], 50, R.red[2], 75, R.red[3], 100, R.red[4]]]);
-      map.setPaintProperty('an-st', 'circle-radius', ['interpolate', ['exponential', 1.6], ['zoom'],
-        10, ['+', 2.5, ['*', 0.8, ['sqrt', ['max', 0, ak]]]], 14, ['+', 6, ['*', 2.4, ['sqrt', ['max', 0, ak]]]], 18, ['+', 12, ['*', 4, ['sqrt', ['max', 0, ak]]]]]);
-    }
-    if (S.sel?.type === 'cell') showCell(S.sel.j, true);
-    if (S.sel?.type === 'anst') showAnStation(S.sel.j, true);
-    if (S.tab === 'stationen') renderStationList();
+  function showRaster(r) {
+    const cv = document.createElement('canvas');
+    cv.width = r.w; cv.height = r.h;
+    cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.rgba.buffer || r.rgba), r.w, r.h), 0, 0);
+    const b = r.bbox;
+    map.getSource('raster').updateImage({ url: cv.toDataURL(), coordinates: [[b.w, b.n], [b.e, b.n], [b.e, b.s], [b.w, b.s]] });
   }
 
-  function renderAvail() {
-    buildCells(S.radius);
-    paintHour();
-    $('#aLegend').innerHTML = `<div class="cap">Chance, dass ${S.radius === 'near' ? 'im Umkreis von ca. 400 m' : 'in diesem 250-m-Feld'} mindestens ein Rad steht</div>
-      <div class="bar" style="background:${gradient(R.seq)}"></div><div class="scale"><span>0 %</span><span>50 %</span><span>100 %</span></div>`;
-    $('#aMore').innerHTML = `${basisBox()}
-      <div class="block"><h2>Bezugsfläche</h2>
-        <div class="seg" id="radiusSeg" role="radiogroup">
-          <button role="radio" data-r="near" aria-checked="${S.radius === 'near'}">Umkreis ~400 m</button>
-          <button role="radio" data-r="prob" aria-checked="${S.radius === 'prob'}">Feld 250 m</button>
-        </div>
-        <p class="hint">„Umkreis“ zählt auch die acht Nachbarfelder mit. Das entspricht eher der Frage, ob du in ein paar Minuten zu Fuß ein Rad erreichst.</p></div>
-      <div class="block"><h2>So liest du die Karte</h2>
-        <p class="hint" style="margin-top:0">Jedes Feld zeigt, in wie viel Prozent der Abfragen zur gewählten Stunde dort mindestens ein Rad stand. Feld antippen für den Tagesverlauf. Mit ▶ läuft der Tag durch.</p></div>`;
-    $$('#radiusSeg button').forEach((b) => b.onclick = () => { S.radius = b.dataset.r; renderAvail(); });
+  function basisLine(polls, days, extra = '') {
+    const warn = polls < 12;
+    return `<div class="basis${warn ? ' warn' : ''}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.5"/></svg>
+      <div>Grundlage: ${nf.format(polls)} Abfragen an ${nf.format(days)} ${days === 1 ? 'Tag' : 'Tagen'}.${warn ? ' Das ist sehr wenig; die Werte sind noch zufällig.' : ''} ${extra}</div></div>`;
+  }
+  const legendTop = (txt) => `<div class="top"><div class="cap">${txt}</div></div>`;
+
+  function renderAvailOut(r) {
+    $('#aLegend').innerHTML = `${legendTop(`Chance auf mindestens ein Rad im Umkreis von ${S.f.R} m, ${wdLabel()} ${winLabel()}`)}
+      <div class="bar" style="background:${gradient(RAMP.avail)}"></div><div class="scale"><span>1 %</span><span>50 %</span><span>100 %</span></div>`;
+    $('#aOut').innerHTML = `${basisLine(r.polls, r.days, r.auto ? `Auflösung automatisch auf ${r.res} m vergröbert, damit es schnell bleibt.` : '')}
+      <p class="hint">Tippe irgendwo auf die Karte: Dann wird genau für diesen Punkt gerechnet, mit Tagesverlauf und typischem Abstand zum nächsten Rad.</p>
+      ${S.me ? '<button class="btn sm ghost" data-act="pointme" type="button">Meinen Standort auswerten</button>' : ''}`;
   }
 
-  function renderDensity() {
-    buildCells('avg');
-    paintHour();
-    $('#aLegend').innerHTML = `<div class="cap">Durchschnittliche Zahl abgestellter Räder</div>
-      <div class="bar" style="background:${gradient(R.heat.slice(1))}"></div><div class="scale"><span>wenige</span><span>viele</span></div>`;
-    $('#aMore').innerHTML = `${basisBox()}
-      <div class="block"><p class="hint" style="margin-top:0">Wo stehen um diese Uhrzeit typischerweise die meisten Räder? Gemittelt über alle Abfragen dieser Stunde. Im Vergleich der Stunden siehst du, wie sich die Flotte über den Tag verlagert.</p></div>
-      <div class="block"><h2>Top-Bereiche um ${S.hour} Uhr</h2><ul class="rows">${topCells('avg').map((x) => `
-        <li><button class="rowbtn" data-act="cell" data-j="${x.j}"><span class="main"><b>${esc(x.name)}</b><small>250-m-Feld an der nächsten Station</small></span>
-        <span class="val">${nf1.format(x.v)}<small>Räder Ø</small></span></button></li>`).join('')}</ul></div>`;
+  function renderDensOut(r) {
+    $('#aLegend').innerHTML = `${legendTop(`Durchschnittlich abgestellte Räder pro Hektar, ${wdLabel()} ${winLabel()}`)}
+      <div class="bar" style="background:${gradient(RAMP.dens)}"></div><div class="scale"><span>wenige</span><span>${nf1.format(r.vmax)} pro ha</span></div>`;
+    $('#aOut').innerHTML = `${basisLine(r.polls, r.days)}
+      <p class="hint">Aus den echten Radpositionen gemittelt und mit ${S.f.smooth ? `${S.f.smooth} m` : 'keiner'} Glättung weichgezeichnet. Ein Hektar sind 100 × 100 m. Tippe auf die Karte für den Tagesverlauf an diesem Punkt.</p>`;
   }
 
-  function nearestStationName(lng, lat) {
-    const A = S.an; let best = -1, bd = Infinity;
-    for (let j = 0; j < A.stations.uid.length; j++) {
-      const d = hav(lat, lng, A.stations.lat[j], A.stations.lng[j]);
-      if (d < bd) { bd = d; best = j; }
-    }
-    return best < 0 ? 'Köln' : A.stations.name[best];
-  }
-
-  function topCells(metric) {
-    const A = S.an, out = [];
-    for (let j = 0; j < A.N; j++) { const v = A.val(metric, S.day, S.hour, j); if (v) out.push({ j, v }); }
-    out.sort((a, b) => b.v - a.v);
-    return out.slice(0, 8).map((x) => { const [lng, lat] = A.cellCenter(A.cells[x.j]); const n = nearestStationName(lng, lat); return { ...x, name: n, near: n }; });
-  }
-
-  function showCell(j, quiet) {
-    const A = S.an; if (!A) return;
-    const metric = S.tab === 'dichte' ? 'avg' : S.radius;
-    const wd = [], we = [];
-    for (let h = 0; h < 24; h++) { wd.push(A.val(metric, 'wd', h, j)); we.push(A.val(metric, 'we', h, j)); }
-    const c = A.cells[j];
-    const [lng, lat] = A.cellCenter(c);
-    const cur = A.combine(wd, we, S.hour);
-    const isP = metric !== 'avg';
-    const head = cur == null ? 'keine Daten' : (isP ? `${Math.round(cur)} %` : `${nf1.format(cur)} Räder`);
-    const where = nearestStationName(lng, lat);
-    S.sel = { type: 'cell', j };
-    showDetail('#detailA', `
-      <p class="kicker">Feld bei ${esc(where)}</p>
-      <h3>${head}</h3>
-      <p class="hint" style="margin-top:-4px">${isP ? `Chance auf mindestens ein Rad ${metric === 'near' ? 'im Umkreis von ca. 400 m' : 'in diesem Feld'}` : 'durchschnittlich abgestellt'}, ${dayLabel(S.day)} um ${S.hour} Uhr</p>
-      ${lineChart({ title: isP ? 'Chance im Tagesverlauf' : 'Räder im Tagesverlauf', unit: isP ? '%' : '', yMax: isP ? 100 : null,
-        series: [{ name: 'Mo–Fr', color: C.wd, values: wd }, { name: 'Sa/So', color: C.we, values: we }], now: S.hour })}`, { keepSel: true, quiet });
-    select({ type: 'Polygon', coordinates: A.cellPoly(c) });
-  }
-
-  // ---- usage
-  function renderUsage() {
-    const A = S.an, U = A.usage, T = U.totals;
+  function renderUsageOut(r) {
+    const { t0, t1 } = winMin();
     $('#aLegend').innerHTML = `<div class="tiles">
-      <div class="stat"><b>${T.per_day != null ? nf.format(Math.round(T.per_day)) : '–'}</b><span>Fahrten/Tag*</span></div>
-      <div class="stat"><b>${T.median_dur_min != null ? `${nf.format(Math.round(T.median_dur_min))} min` : '–'}</b><span>Dauer, Median</span></div>
-      <div class="stat"><b>${T.median_dist_m != null ? fmtDist(T.median_dist_m) : '–'}</b><span>Luftlinie, Median</span></div></div>`;
-    const ser = U.series;
-    const hours = [...Array(25).keys()].slice(0, 24);
-    const dur = U.dur_hist.counts, dist = U.dist_hist.counts;
-    $('#aMore').innerHTML = `${basisBox()}
-      <div class="block">${lineChart({ title: 'Räder unterwegs nach Uhrzeit', sub: 'Durchschnitt', series: [
-        { name: 'Mo–Fr', color: C.wd, values: U.inuse.wd }, { name: 'Sa/So', color: C.we, values: U.inuse.we }], now: localHour(now()) })}</div>
-      <div class="block">${lineChart({ title: 'Fahrtbeginne pro Stunde', sub: 'Durchschnitt', series: [
-        { name: 'Mo–Fr', color: C.wd, values: U.trips_per_h.wd }, { name: 'Sa/So', color: C.we, values: U.trips_per_h.we }], now: localHour(now()) })}</div>
-      <div class="block">${timeChart({ title: 'Räder unterwegs, letzte Tage', t: ser.t, values: ser.inuse, color: C.we })}</div>
-      <div class="block">${barChart({ title: 'Fahrtdauer', sub: `${nf.format(T.trips - T.short)} Fahrten mit messbarer Dauer`, values: dur,
-        labels: dur.map((_, k) => k === dur.length - 1 ? '>2 h' : `${k * 5}–${k * 5 + 5} min`), tickEvery: 6, tickLabel: (k) => k === dur.length - 1 ? '' : `${k * 5}` , unitX: 'min' })}</div>
-      <div class="block">${barChart({ title: 'Strecke (Luftlinie)', sub: `${nf.format(T.trips)} Fahrten`, values: dist,
-        labels: dist.map((_, k) => k === dist.length - 1 ? '>8 km' : `${nf1.format(k * 0.25)}–${nf1.format(k * 0.25 + 0.25)} km`), tickEvery: 4, tickLabel: (k) => k === dist.length - 1 ? '' : nf1.format(k * 0.25), unitX: 'km' })}</div>
-      <div class="block"><h2>Wie wird gezählt?</h2><p class="hint" style="margin-top:0">
-        * Fahrten sind geschätzt: Ein Rad verschwindet aus dem Feed und taucht mindestens ${A.params.trip_min_gone_m} m entfernt wieder auf,
-        oder es springt zwischen zwei Abfragen mehr als ${A.params.trip_min_m} m. Abwesenheiten über ${A.params.max_trip_h} Stunden gelten als Werkstatt oder Umverteilung
-        (${nf.format(T.service)}), Rückgaben am selben Ort als Rundfahrt oder Reservierung (${nf.format(T.roundtrips)}). Kurze Fahrten zwischen zwei Abfragen haben keine messbare Dauer.
-        Umverteilung per Transporter lässt sich nicht sicher von Fahrten trennen.</p></div>`;
+      <div class="stat"><b>${r.perDay != null ? nf.format(Math.round(r.perDay)) : '–'}</b><span>Fahrten pro Tag</span></div>
+      <div class="stat"><b>${r.medDur != null ? `${nf.format(Math.round(r.medDur))} min` : '–'}</b><span>Dauer, Median</span></div>
+      <div class="stat"><b>${r.medDist != null ? fmtDist(r.medDist) : '–'}</b><span>Luftlinie, Median</span></div></div>
+      <p class="hint" style="margin-top:6px">Fahrten mit Start ${winLabel()}, ${wdLabel()}</p>`;
+    const dur = r.durH, dist = r.distH;
+    $('#aOut').innerHTML = `${basisLine(r.series.t.length, r.days)}
+      <div class="block">${lineChart({ title: 'Räder unterwegs nach Uhrzeit', sub: `Durchschnitt, ${wdLabel()}`, series: [{ name: wdLabel(), color: C.wd, values: r.inuseH }], band: [t0, t1] })}</div>
+      <div class="block">${lineChart({ title: 'Fahrtbeginne pro Stunde', sub: `Durchschnitt, ${wdLabel()}`, series: [{ name: wdLabel(), color: C.wd, values: r.perHour }], band: [t0, t1] })}</div>
+      <div class="block">${timeChart({ title: 'Räder unterwegs im Zeitraum', t: r.series.t, values: r.series.inuse, color: C.we })}</div>
+      <div class="block">${barChart({ title: 'Fahrtdauer', sub: `${nf.format(r.count - r.short)} Fahrten mit messbarer Dauer`, values: dur,
+        labels: dur.map((_, k) => (k === dur.length - 1 ? '>2 h' : `${k * 5}–${k * 5 + 5} min`)), tickEvery: 6, tickLabel: (k) => (k === dur.length - 1 ? '' : `${k * 5}`), unitX: 'min' })}</div>
+      <div class="block">${barChart({ title: 'Strecke (Luftlinie)', sub: `${nf.format(r.count)} Fahrten`, values: dist,
+        labels: dist.map((_, k) => (k === dist.length - 1 ? '>8 km' : `${nf1.format(k * 0.25)}–${nf1.format(k * 0.25 + 0.25)} km`)), tickEvery: 4, tickLabel: (k) => (k === dist.length - 1 ? '' : nf1.format(k * 0.25)), unitX: 'km' })}</div>
+      <p class="hint">Nicht als Fahrt gezählt: ${nf.format(r.service)} Abwesenheiten über ${nf1.format(S.f.maxDurH)} h und ${nf.format(r.round)} Rückkehren an denselben Ort. Kurze Fahrten zwischen zwei Abfragen haben keine messbare Dauer. Umverteilung per Transporter lässt sich nicht sicher abtrennen.</p>`;
   }
 
-  // ---- flows
-  function renderFlows() {
-    const A = S.an, F = A.flows, p = S.part;
-    // net in/outflow per fine cell
-    const net = [];
-    for (const row of F.net) {
-      const c = row[0];
-      const s = p < 0 ? row[1] + row[2] + row[3] + row[4] : row[1 + p];
-      const e = p < 0 ? row[5] + row[6] + row[7] + row[8] : row[5 + p];
-      const n = s + e;
-      if (n < 2) continue;
-      net.push({ type: 'Feature', geometry: { type: 'Polygon', coordinates: A.cellPoly(c) }, properties: { c, v: (e - s) / n, n, s, e } });
-    }
-    setData('net', { type: 'FeatureCollection', features: net });
-    const od = F.od.filter((r) => r[2] === p).slice(0, 45);
-    const max = Math.max(1, ...od.map((r) => r[3]));
-    setData('flows', { type: 'FeatureCollection', features: od.map(([o, d, , c]) => ({
-      type: 'Feature', geometry: { type: 'LineString', coordinates: arc(A.coarseCenter(o), A.coarseCenter(d)) }, properties: { w: 0.15 + 0.85 * (c / max) } })) });
-    $('#aLegend').innerHTML = `<div class="cap">Bilanz je Feld: mehr Fahrten beginnen (rot) oder enden (blau)</div>
+  function nearestLiveStation(lng, lat) {
+    let best = null, bd = Infinity;
+    for (const s of S.live?.stations || []) { const d = hav(lat, lng, s.lat, s.lng); if (d < bd) { bd = d; best = s; } }
+    return best ? best.name : `${nf1.format(lat)}, ${nf1.format(lng)}`;
+  }
+
+  function renderFlowsOut(r) {
+    const max = Math.max(1, ...r.lines.map((l) => l[4]));
+    setData('flows', { type: 'FeatureCollection', features: r.lines.map(([x0, y0, x1, y1, c]) => ({
+      type: 'Feature', geometry: { type: 'LineString', coordinates: arc([x0, y0], [x1, y1]) }, properties: { w: 0.15 + 0.85 * (c / max), c } })) });
+    const vmax = Math.max(1, ...r.cells.map((c) => c[2] + c[3]));
+    setData('netc', { type: 'FeatureCollection', features: r.cells.filter((c) => c[2] + c[3] >= 2).map(([x, y, s, e]) => ({
+      type: 'Feature', geometry: { type: 'Point', coordinates: [x, y] }, properties: { v: (e - s) / (e + s), n: e + s, s, e, rel: Math.sqrt((e + s) / vmax) } })) });
+    $('#aLegend').innerHTML = `${legendTop(`Bilanz je ${fmtDist(r.cell)}-Feld: mehr Fahrten beginnen (rot) oder enden (blau)`)}
       <div class="bar" style="background:${gradient([R.div.neg[0], R.div.neg[1], R.div.neg[2], R.div.mid, R.div.pos[0], R.div.pos[1], R.div.pos[2]])}"></div>
       <div class="scale"><span>Abfluss</span><span>ausgeglichen</span><span>Zufluss</span></div>`;
-    const top = od.slice(0, 10);
-    $('#aMore').innerHTML = `${basisBox()}
-      <div class="block"><p class="hint" style="margin-top:0">Linien zeigen die häufigsten Verbindungen zwischen 1-km-Feldern, kräftiger zum Ziel hin. Rote Felder leeren sich in dieser Tageszeit, blaue füllen sich.</p></div>
-      <div class="block"><h2>Häufigste Verbindungen${p >= 0 ? `, ${esc(F.dayparts[p])}` : ''}</h2>
-      ${top.length ? `<ul class="rows">${top.map(([o, d, , c]) => {
-        const [ol, oa] = A.coarseCenter(o), [dl, da] = A.coarseCenter(d);
-        return `<li><span class="main"><b>${esc(nearestStationName(ol, oa))}</b><small>nach ${esc(nearestStationName(dl, da))}, ${fmtDist(hav(oa, ol, da, dl))}</small></span><span class="val">${nf.format(c)}<small>Fahrten</small></span></li>`;
-      }).join('')}</ul>` : '<p class="hint">Noch keine Fahrten in diesem Zeitraum.</p>'}</div>`;
+    const top = r.lines.slice(0, 12);
+    $('#aOut').innerHTML = `${basisLine(r.trips, filterDates().dates.length, `${nf.format(r.trips)} geschätzte Fahrten im Filter.`)}
+      <p class="hint">Kreise: Größe = Zahl der Fahrten, Farbe = Bilanz. Linien: häufigste Verbindungen, kräftiger zum Ziel hin.</p>
+      <h2 style="margin-top:12px">Häufigste Verbindungen</h2>
+      ${top.length ? `<ul class="rows">${top.map(([x0, y0, x1, y1, c]) => `<li><span class="main"><b>${esc(nearestLiveStation(x0, y0))}</b><small>nach ${esc(nearestLiveStation(x1, y1))}, ${fmtDist(hav(y0, x0, y1, x1))}</small></span><span class="val">${nf.format(c)}<small>Fahrten</small></span></li>`).join('')}</ul>`
+        : '<p class="hint">Keine Verbindung erreicht die Mindestzahl.</p>'}`;
   }
 
   function arc(a, b) {
     const [x0, y0] = a, [x1, y1] = b;
     const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
-    const dx = x1 - x0, dy = (y1 - y0) * 1.58; // aspect at 51°N
-    const cx = mx - dy * 0.18 / 1.0, cy = my + dx * 0.18 / 1.58;
+    const dx = x1 - x0, dy = (y1 - y0) * 1.58;
+    const cx = mx - dy * 0.18, cy = my + (dx * 0.18) / 1.58;
     const pts = [];
-    for (let k = 0; k <= 20; k++) {
-      const t = k / 20, u = 1 - t;
-      pts.push([u * u * x0 + 2 * u * t * cx + t * t * x1, u * u * y0 + 2 * u * t * cy + t * t * y1]);
-    }
+    for (let k = 0; k <= 20; k++) { const t = k / 20, u = 1 - t; pts.push([u * u * x0 + 2 * u * t * cx + t * t * x1, u * u * y0 + 2 * u * t * cy + t * t * y1]); }
     return pts;
   }
 
-  function showNetCell(c) {
-    const A = S.an; const row = A.flows.net.find((r) => r[0] === c);
-    if (!row) return;
-    const [lng, lat] = A.cellCenter(c);
-    const names = A.flows.dayparts;
+  function showNetCell(p, lngLat) {
     showDetail('#detailA', `
-      <p class="kicker">Feld bei ${esc(nearestStationName(lng, lat))}</p>
-      <h3>${nf.format(row.slice(1, 5).reduce((a, b) => a + b, 0))} ab, ${nf.format(row.slice(5).reduce((a, b) => a + b, 0))} an</h3>
-      <ul class="rows">${names.map((n, k) => `<li><span class="main"><b>${esc(n)}</b></span><span class="val">${row[1 + k]} / ${row[5 + k]}<small>Abfahrten / Ankünfte</small></span></li>`).join('')}</ul>`, { keepSel: true });
-    select({ type: 'Polygon', coordinates: A.cellPoly(c) });
+      <p class="kicker">Feld bei ${esc(nearestLiveStation(lngLat[0], lngLat[1]))}</p>
+      <h3>${nf.format(p.s)} Starts, ${nf.format(p.e)} Ankünfte</h3>
+      <p class="hint" style="margin-top:-4px">${wdLabel()}, ${winLabel()}, ${rangeLabel()}. ${p.e > p.s ? 'Hier sammeln sich Räder an.' : p.e < p.s ? 'Von hier fahren mehr Räder weg als ankommen.' : 'Ausgeglichen.'}</p>`);
+    select({ type: 'Point', coordinates: lngLat });
   }
 
-  // ---- stations
-  let anstKey = '';
-  function renderStations() {
-    const A = S.an, St = A.stations;
-    const key = `${S.day}|${A.stamp}`;
-    if (key !== anstKey) {
-      anstKey = key;
-      setData('anst', { type: 'FeatureCollection', features: St.uid.map((u, j) => {
-        const props = { j };
-        for (let h = 0; h < 24; h++) {
-          const e = A.combine(St.empty.wd[j], St.empty.we[j], h), a = A.combine(St.avg.wd[j], St.avg.we[j], h);
-          props[`e${h}`] = e == null ? -1 : e; props[`a${h}`] = a == null ? -1 : a / 10;
-        }
-        return { type: 'Feature', geometry: { type: 'Point', coordinates: [St.lng[j], St.lat[j]] }, properties: props };
-      }) });
-    }
-    paintHour();
-    $('#aLegend').innerHTML = `<div class="cap">Chance, dass die Station leer ist (Größe: Ø Räder)</div>
+  function renderStationsOut(r) {
+    S.stList = r.list;
+    setData('anst', { type: 'FeatureCollection', features: r.list.filter((s) => s.p != null).map((s) => ({
+      type: 'Feature', geometry: { type: 'Point', coordinates: [s.lng, s.lat] }, properties: { uid: s.uid, p: s.p, a: s.avg } })) });
+    $('#aLegend').innerHTML = `${legendTop(`Chance, dass die Station ${S.f.k ? `höchstens ${S.f.k} ${S.f.k === 1 ? 'Rad' : 'Räder'} hat` : 'leer ist'} (Größe: Ø Räder)`)}
       <div class="bar" style="background:${gradient(R.red)}"></div><div class="scale"><span>0 %</span><span>50 %</span><span>100 %</span></div>`;
-    $('#aMore').innerHTML = `${basisBox()}<div class="block" id="stList"></div>`;
-    renderStationList();
+    const rows = r.list.filter((s) => s.p != null);
+    const empty = rows.slice().sort((x, y) => y.p - x.p || x.avg - y.avg).slice(0, 8);
+    const full = rows.slice().sort((x, y) => y.avg - x.avg).slice(0, 5);
+    const li = (s, v, sub) => `<li><button class="rowbtn" data-act="stq" data-id="${esc(s.uid)}"><span class="main"><b>${esc(s.name)}</b><small>${sub}</small></span><span class="val">${v}</span></button></li>`;
+    $('#aOut').innerHTML = `${basisLine(r.polls, filterDates().dates.length)}
+      <h2 style="margin-top:12px">Am häufigsten ${S.f.k ? 'fast leer' : 'leer'}</h2><ul class="rows">${empty.map((s) => li(s, `${Math.round(s.p)} %<small>${S.f.k ? 'fast leer' : 'leer'}</small>`, `Ø ${nf1.format(s.avg)} Räder`)).join('')}</ul>
+      <h2 style="margin-top:16px">Meist gut gefüllt</h2><ul class="rows">${full.map((s) => li(s, `${nf1.format(s.avg)}<small>Räder Ø</small>`, `${Math.round(s.p)} % ${S.f.k ? 'fast leer' : 'leer'}`)).join('')}</ul>`;
   }
 
-  function renderStationList() {
-    const el = $('#stList'); if (!el) return;
-    const A = S.an, St = A.stations, h = S.hour;
-    const rows = St.uid.map((u, j) => ({ j, e: A.combine(St.empty.wd[j], St.empty.we[j], h), a: A.combine(St.avg.wd[j], St.avg.we[j], h) }))
-      .filter((r) => r.e != null);
-    const empty = rows.slice().sort((x, y) => y.e - x.e || x.a - y.a).slice(0, 8);
-    const full = rows.slice().sort((x, y) => y.a - x.a).slice(0, 5);
-    const li = (r, v, sub) => `<li><button class="rowbtn" data-act="anst" data-j="${r.j}"><span class="main"><b>${esc(St.name[r.j])}</b><small>${sub}</small></span><span class="val">${v}</span></button></li>`;
-    el.innerHTML = `<h2>Oft leer um ${h} Uhr</h2><ul class="rows">${empty.map((r) => li(r, `${Math.round(r.e)} %<small>leer</small>`, `Ø ${nf1.format(r.a / 10)} Räder`)).join('')}</ul>
-      <h2 style="margin-top:16px">Meist gut gefüllt</h2><ul class="rows">${full.map((r) => li(r, `${nf1.format(r.a / 10)}<small>Räder Ø</small>`, `${Math.round(r.e)} % leer`)).join('')}</ul>`;
+  // exact query for one map location
+  async function pointQuery(lng, lat, quiet) {
+    S.sel = { type: 'point', lng, lat };
+    const R = S.f.R;
+    setData('qpt', { type: 'FeatureCollection', features: [circle([lng, lat], R), { type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] }, properties: {} }] });
+    if (!quiet) showDetail('#detailA', '<p class="kicker">Ausgewählter Ort</p><h3>…</h3><span class="busy">rechnet …</span>', { keepSel: true });
+    const { dates } = filterDates();
+    const r = await rpc('point', { F: F(), dates, lat, lng, R });
+    if (S.sel?.type !== 'point' || S.sel.lng !== lng) return;
+    const dens = S.tab === 'dichte';
+    const w = r.win;
+    const where = nearestLiveStation(lng, lat);
+    const head = !w ? 'keine Daten' : dens ? `${nf1.format(w.avg)} Räder` : `${Math.round(w.pct)} %`;
+    const sub = !w ? '' : dens ? `im Schnitt im Umkreis von ${R} m, ${wdLabel()} ${winLabel()}` : `Chance auf mindestens ein Rad im Umkreis von ${R} m, ${wdLabel()} ${winLabel()}`;
+    const vals = (o) => (dens ? o.avg : o.pct);
+    showDetail('#detailA', `
+      <p class="kicker">Nahe ${esc(where)}</p>
+      <h3>${head}</h3>
+      <p class="hint" style="margin-top:-4px">${sub}${w ? `. Grundlage: ${nf.format(w.n)} Abfragen.` : ''}</p>
+      ${w && !dens ? `<dl class="kv" style="margin-top:6px"><dt>Ø Räder im Umkreis</dt><dd>${nf1.format(w.avg)}</dd>
+        ${r.nearestMedian != null ? `<dt>Nächstes Rad typisch</dt><dd>${fmtDist(r.nearestMedian)} entfernt (Median)</dd>` : ''}</dl>` : ''}
+      ${lineChart({ title: dens ? 'Räder im Umkreis über den Tag' : 'Chance über den Tag', sub: '15-Minuten-Schritte', unit: dens ? '' : '%', yMax: dens ? null : 100,
+        series: [{ name: wdLabel(), color: C.wd, values: vals(r.sel) }, ...(wdLabel() !== 'alle Tage' ? [{ name: 'alle Tage', color: C.muted, values: vals(r.all) }] : [])],
+        band: [winMin().t0, winMin().t1] })}
+      <div class="actions"><button class="btn sm ghost" data-act="clearpoint">Auswahl aufheben</button></div>`, { keepSel: true, quiet });
   }
 
-  function stationCharts(j) {
-    const A = S.an, St = A.stations;
-    const avg = (d) => St.avg[d][j].map((v) => v == null ? null : v / 10);
-    return `${lineChart({ title: 'Räder im Tagesverlauf', sub: 'Durchschnitt', series: [{ name: 'Mo–Fr', color: C.wd, values: avg('wd') }, { name: 'Sa/So', color: C.we, values: avg('we') }], now: S.mode === 'analyse' ? S.hour : localHour(now()) })}
-      ${lineChart({ title: 'Chance, dass sie leer ist', unit: '%', yMax: 100, series: [{ name: 'Mo–Fr', color: C.wd, values: St.empty.wd[j] }, { name: 'Sa/So', color: C.we, values: St.empty.we[j] }], now: S.mode === 'analyse' ? S.hour : localHour(now()) })}`;
+  function circle([lng, lat], r) {
+    const pts = [];
+    for (let k = 0; k <= 64; k++) {
+      const a = (k / 64) * 2 * Math.PI;
+      pts.push([lng + (r * Math.cos(a)) / (111320 * Math.cos(lat * Math.PI / 180)), lat + (r * Math.sin(a)) / 111320]);
+    }
+    return { type: 'Feature', geometry: { type: 'Polygon', coordinates: [pts] }, properties: {} };
   }
 
-  function showAnStation(j, quiet) {
-    const A = S.an, St = A.stations;
-    S.sel = { type: 'anst', j };
-    const e = A.combine(St.empty.wd[j], St.empty.we[j], S.hour);
+  async function stationQuery(uid, quiet, target = '#detailA') {
+    if (target === '#detailA') S.sel = { type: 'station', uid };
+    await ensureIndex();
+    const { dates } = filterDates();
+    const k = S.f.k;
+    const r = await rpc('stationProfile', { F: F(), dates, uid: String(uid), k });
+    const el = target === '#detailA' ? null : $(target);
+    if (!r) { if (el) el.innerHTML = '<p class="hint">Noch keine Auswertung für diese Station.</p>'; return; }
+    const charts = `${lineChart({ title: 'Räder im Tagesverlauf', sub: 'Durchschnitt', series: [{ name: wdLabel(), color: C.wd, values: r.sel.avg }, ...(wdLabel() !== 'alle Tage' ? [{ name: 'alle Tage', color: C.muted, values: r.all.avg }] : [])], band: [winMin().t0, winMin().t1] })}
+      ${lineChart({ title: k ? `Chance auf höchstens ${k} ${k === 1 ? 'Rad' : 'Räder'}` : 'Chance, dass sie leer ist', unit: '%', yMax: 100, series: [{ name: wdLabel(), color: C.wd, values: r.sel.p }, ...(wdLabel() !== 'alle Tage' ? [{ name: 'alle Tage', color: C.muted, values: r.all.p }] : [])], band: [winMin().t0, winMin().t1] })}
+      <p class="hint">${wdLabel()}, ${rangeLabel()}.</p>`;
+    if (el) { el.innerHTML = charts; bindCharts(el); return; }
+    if (S.sel?.type !== 'station' || S.sel.uid !== uid) return;
+    const s = S.stList?.find((x) => x.uid === uid);
     showDetail('#detailA', `
       <p class="kicker"><span class="dot" style="background:${C.station}"></span>Station</p>
-      <h3>${esc(St.name[j])}</h3>
-      <p class="hint" style="margin-top:-4px">${e == null ? 'Keine Daten für diese Stunde.' : `${dayLabel(S.day)} um ${S.hour} Uhr in ${Math.round(e)} % der Abfragen leer.`}</p>
-      ${stationCharts(j)}`, { keepSel: true, quiet });
-    select({ type: 'Point', coordinates: [St.lng[j], St.lat[j]] });
-    if (!quiet) flyTo([St.lng[j], St.lat[j]], 14);
+      <h3>${esc(r.name)}</h3>
+      ${s && s.p != null ? `<p class="hint" style="margin-top:-4px">${wdLabel()} ${winLabel()}: in ${Math.round(s.p)} % der Abfragen ${k ? `höchstens ${k} ${k === 1 ? 'Rad' : 'Räder'}` : 'leer'}, im Schnitt ${nf1.format(s.avg)} Räder.</p>` : ''}
+      ${charts}`, { keepSel: true, quiet });
+    select({ type: 'Point', coordinates: [r.lng, r.lat] });
+    if (!quiet) flyTo([r.lng, r.lat], 14);
   }
 
-  // ---- idle
+  // ---- idle (from the live snapshot)
   function renderIdle() {
     if (!S.live || S.mode !== 'analyse' || S.tab !== 'standzeit') return;
     const t = now(), bins = [0, 0, 0, 0];
     const cls = (b) => { const d = (t - b.since) / 86400; return d < 1 ? 0 : d < 3 ? 1 : d < 7 ? 2 : 3; };
+    const ok = (b) => b.since && (t - b.since) / 86400 >= S.f.idleMin && kindOk(b);
+    const kindOk = (b) => S.f.kind === 'all' || (S.f.kind === 'free' ? b.kind !== 'station' : b.kind === 'station');
     const feats = [];
     for (const b of S.live.bikes) {
-      if (!b.since) continue;
+      if (!ok(b)) continue;
       const c = cls(b); bins[c]++;
       feats.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [b.lng, b.lat] }, properties: { c, id: b.bike } });
     }
@@ -1146,32 +1219,71 @@
     const labels = ['unter 1 Tag', '1–3 Tage', '3–7 Tage', 'über 7 Tage'];
     $('#aLegend').innerHTML = `<div class="cap">Wie lange ein Rad unberührt am selben Ort steht</div>
       <div class="cats">${labels.map((l, k) => `<span><i style="background:${R.idle[k]}"></i>${l} (${nf.format(bins[k])})</span>`).join('')}</div>`;
-    const longest = S.live.bikes.filter((b) => b.since).sort((a, b) => a.since - b.since).slice(0, 15);
-    const startTs = S.an?.window?.from;
-    $('#aMore').innerHTML = `${S.an ? basisBox() : ''}
-      <div class="block"><h2>Am längsten unbewegt</h2><ul class="rows">${longest.map((b) => {
-        const st = b.kind === 'station' ? S.live.stById.get(String(b.place_uid)) : null;
-        return `<li><button class="rowbtn" data-act="bike" data-id="${esc(b.bike)}"><span class="dot" style="background:${R.idle[cls(b)]}"></span>
-          <span class="main"><b>Rad ${esc(b.bike)}</b><small>${st ? esc(st.name) : 'frei abgestellt'}</small></span>
-          <span class="val">${b.since_censored ? 'mind. ' : ''}${fmtDur(t - b.since).replace(' Tagen', ' Tg.')}</span></button></li>`;
-      }).join('')}</ul>
-      <p class="hint">Ein Rad gilt als bewegt, wenn es aus dem Feed verschwindet oder sich mehr als 100 m verschiebt.${startTs ? ` Die Aufzeichnung beginnt am ${fDM.format(new Date(startTs * 1000))}; ältere Standzeiten sind als „mind.“ markiert.` : ''}</p></div>`;
+    const longest = S.live.bikes.filter(ok).sort((a, b) => a.since - b.since).slice(0, 20);
+    const out = $('#aOut');
+    if (!out) return;
+    out.innerHTML = `<h2>Am längsten unbewegt</h2><ul class="rows">${longest.map((b) => {
+      const st = b.kind === 'station' ? S.live.stById.get(String(b.place_uid)) : null;
+      return `<li><button class="rowbtn" data-act="bike" data-id="${esc(b.bike)}"><span class="dot" style="background:${R.idle[cls(b)]}"></span>
+        <span class="main"><b>Rad ${esc(b.bike)}</b><small>${st ? esc(st.name) : 'frei abgestellt'}</small></span>
+        <span class="val">${b.since_censored ? 'mind. ' : ''}${fmtDur(t - b.since).replace(' Tagen', ' Tg.')}</span></button></li>`;
+    }).join('')}</ul>
+      <p class="hint">Ein Rad gilt als bewegt, wenn es aus dem Feed verschwindet oder sich mehr als 100 m verschiebt. Standzeiten, die vor Beginn der Aufzeichnung anfingen, sind als „mind.“ markiert.</p>`;
   }
 
-  // ---------------------------------------------------------------- hour UI
-  function syncHourUI() {
-    $('#hRange').value = S.hour;
-    $('#hLabel').textContent = `${S.hour} Uhr`;
-    $('#hRange').setAttribute('aria-valuetext', `${S.hour} Uhr`);
-    for (const b of $$('#dayType button')) b.setAttribute('aria-checked', String(b.dataset.d === S.day));
-    for (const b of $$('#partBar button')) b.setAttribute('aria-checked', String(+b.dataset.p === S.part));
+  // ---------------------------------------------------------------- filter inputs
+  let wTimer = 0;
+  function stopWindowPlay() { S.wPlaying = false; clearInterval(wTimer); $('#wPlay').classList.remove('on'); }
+  function startWindowPlay() {
+    S.wPlaying = true; $('#wPlay').classList.add('on');
+    clearInterval(wTimer);
+    wTimer = setInterval(() => {
+      const width = ((S.f.b - S.f.a) % 96 + 96) % 96 || 4;
+      S.f.a = (S.f.a + 4) % 96; S.f.b = (S.f.a + width) % 96 || 96;
+      syncFilterUI(); saveFilter(); scheduleCompute(0);
+    }, 1400);
   }
-  let hTimer = 0;
-  function stopHourPlay() { S.hPlaying = false; clearInterval(hTimer); $('#hPlay').classList.remove('on'); }
-  function startHourPlay() {
-    S.hPlaying = true; $('#hPlay').classList.add('on');
-    clearInterval(hTimer);
-    hTimer = setInterval(() => { S.hour = (S.hour + 1) % 24; syncHourUI(); paintHour(); }, 900);
+
+  function bindFilterInputs() {
+    const root = $('#filters');
+    if (!root) return;
+    root.querySelectorAll('input[data-param]').forEach((inp) => {
+      const k = inp.dataset.param;
+      inp.addEventListener('input', () => {
+        S.f[k] = +inp.value;
+        $(`#${inp.id}-o`).textContent = FMT[k](inp.value);
+        syncFilterUI(); saveFilter();
+        if (k === 'R' && S.sel?.type === 'point') setData('qpt', { type: 'FeatureCollection', features: [circle([S.sel.lng, S.sel.lat], S.f.R)] });
+        scheduleCompute(k === 'R' || k === 'res' ? 250 : 150);
+      });
+    });
+    root.querySelectorAll('[data-seg]').forEach((seg) => seg.addEventListener('click', (e) => {
+      const b = e.target.closest('button'); if (!b) return;
+      const k = seg.dataset.seg;
+      S.f[k] = k === 'range' && b.dataset.v !== 'all' ? +b.dataset.v : b.dataset.v;
+      seg.querySelectorAll('button').forEach((x) => x.setAttribute('aria-checked', String(x === b)));
+      if (k === 'range') { const { from, to } = filterDates(); $('#fFrom').value = from; $('#fTo').value = to; }
+      syncFilterUI(); saveFilter(); scheduleCompute(0);
+    }));
+    for (const id of ['#fFrom', '#fTo']) $(id)?.addEventListener('change', () => {
+      S.f.range = 'custom'; S.f.from = $('#fFrom').value; S.f.to = $('#fTo').value;
+      root.querySelectorAll('[data-seg="range"] button').forEach((x) => x.setAttribute('aria-checked', 'false'));
+      syncFilterUI(); saveFilter(); scheduleCompute(0);
+    });
+    root.querySelectorAll('[data-wd]').forEach((b) => b.addEventListener('click', () => {
+      const i = +b.dataset.wd; S.f.wd[i] = S.f.wd[i] ? 0 : 1;
+      b.setAttribute('aria-pressed', String(!!S.f.wd[i]));
+      syncFilterUI(); saveFilter(); scheduleCompute(200);
+    }));
+    root.querySelectorAll('[data-wdp]').forEach((b) => b.addEventListener('click', () => {
+      S.f.wd = b.dataset.wdp.split('').map(Number);
+      root.querySelectorAll('[data-wd]').forEach((x) => x.setAttribute('aria-pressed', String(!!S.f.wd[+x.dataset.wd])));
+      syncFilterUI(); saveFilter(); scheduleCompute(0);
+    }));
+    root.querySelectorAll('[data-win]').forEach((b) => b.addEventListener('click', () => {
+      const [a, c] = b.dataset.win.split(',').map(Number); S.f.a = a; S.f.b = c;
+      syncFilterUI(); saveFilter(); scheduleCompute(0);
+    }));
   }
 
   // ---------------------------------------------------------------- detail
@@ -1194,7 +1306,7 @@
   function closeDetail(silent) {
     for (const el of $$('.detail')) { el.hidden = true; el.innerHTML = ''; }
     S.sel = null;
-    if (styleReady) select(null);
+    if (styleReady) { select(null); setData('qpt', EMPTY); applyVisibility(); }
     if (!silent && !isDesktop() && sheetState === 'half') setSheet('peek');
   }
 
@@ -1210,31 +1322,42 @@
   let chartSeq = 0;
   const chartData = new Map();
 
-  function lineChart({ title, sub, series, now: nowH, unit = '', yMax }) {
-    const H = 150, L = 30, Rr = 58, T = 10, B = 22, w = CW - L - Rr, h = H - T - B;
+  // values over one day (24 hours or 96 quarter hours); band = [t0, t1] minutes
+  function lineChart({ title, sub, series, unit = '', yMax, band }) {
+    const H = 150, L = 30, multi = series.length > 1, Rr = multi ? 62 : 10, T = 10, B = 22, w = CW - L - Rr, h = H - T - B;
+    const n = series[0].values.length, perH = n / 24;
     const all = series.flatMap((s) => s.values).filter((v) => v != null);
     if (!all.length) return `<div class="chart"><div class="chart-title"><h2>${title}</h2></div><p class="hint">Noch keine Daten.</p></div>`;
     const ymax = yMax ?? niceMax(Math.max(...all) * 1.08);
-    const X = (i) => L + (i / 23) * w, Y = (v) => T + h - (v / ymax) * h;
+    const X = (i) => L + ((i + 0.5) / n) * w, Y = (v) => T + h - (v / ymax) * h;
+    const XM = (min) => L + (min / 1440) * w;
     const grid = [0, 0.5, 1].map((f) => `<line x1="${L}" x2="${L + w}" y1="${Y(ymax * f)}" y2="${Y(ymax * f)}"/>`).join('');
     const ylab = [0, 0.5, 1].map((f) => `<text x="${L - 6}" y="${Y(ymax * f) + 3.5}" text-anchor="end">${nf1.format(ymax * f)}${f === 1 ? unit : ''}</text>`).join('');
-    const xlab = [0, 6, 12, 18, 23].map((hh) => `<text x="${X(hh)}" y="${H - 5}" text-anchor="middle">${hh === 23 ? '23' : hh}</text>`).join('');
+    const xlab = [0, 6, 12, 18, 24].map((hh) => `<text x="${XM(hh * 60)}" y="${H - 5}" text-anchor="${hh === 0 ? 'start' : hh === 24 ? 'end' : 'middle'}">${hh}</text>`).join('');
+    let bandSvg = '';
+    if (band && band[0] !== band[1]) {
+      const [b0, b1] = band;
+      const rect = (x0, x1) => `<rect class="band" x="${XM(x0)}" y="${T}" width="${Math.max(1, XM(x1) - XM(x0))}" height="${h}"/>`;
+      bandSvg = b0 < b1 ? rect(b0, b1) : rect(b0, 1440) + rect(0, b1);
+    }
     const paths = series.map((s) => {
       let d = '', pen = false;
       s.values.forEach((v, i) => { if (v == null) { pen = false; return; } d += `${pen ? 'L' : 'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`; pen = true; });
       return `<path d="${d}" fill="none" stroke="${s.color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
-    }).join('');
-    // direct labels at the last value, nudged apart
-    const ends = series.map((s) => { let i = s.values.length - 1; while (i >= 0 && s.values[i] == null) i--; return i < 0 ? null : { s, y: Y(s.values[i]) }; }).filter(Boolean);
-    ends.sort((a, b) => a.y - b.y);
-    for (let k = 1; k < ends.length; k++) if (ends[k].y - ends[k - 1].y < 13) ends[k].y = ends[k - 1].y + 13;
-    const labels = ends.map((e) => `<circle cx="${L + w + 6}" cy="${e.y}" r="3.5" fill="${e.s.color}"/><text class="dl" x="${L + w + 13}" y="${e.y + 4}">${e.s.name}</text>`).join('');
-    const nowLine = nowH != null ? `<line class="now" x1="${X(nowH)}" x2="${X(nowH)}" y1="${T}" y2="${T + h}"/>` : '';
+    }).reverse().join('');
+    let labels = '';
+    if (multi) {
+      const ends = series.map((s) => { let i = s.values.length - 1; while (i >= 0 && s.values[i] == null) i--; return i < 0 ? null : { s, y: Y(s.values[i]) }; }).filter(Boolean);
+      ends.sort((a, b) => a.y - b.y);
+      for (let k = 1; k < ends.length; k++) if (ends[k].y - ends[k - 1].y < 13) ends[k].y = ends[k - 1].y + 13;
+      labels = ends.map((e) => `<circle cx="${L + w + 6}" cy="${e.y}" r="3.5" fill="${e.s.color}"/><text class="dl" x="${L + w + 13}" y="${e.y + 4}">${esc(e.s.name)}</text>`).join('');
+    }
     const id = `c${++chartSeq}`;
-    chartData.set(id, { kind: 'hour', series, X, L, w, unit, fmt: (i) => `${i} Uhr` });
-    return `<div class="chart" data-chart="${id}"><div class="chart-title"><h2>${title}</h2>${sub ? `<span>${sub}</span>` : ''}</div>
+    chartData.set(id, { kind: 'day', series, X, L, w, n, unit,
+      fmt: (i) => (perH === 1 ? `${i}–${i + 1} Uhr` : `${minToStr(i * (1440 / n))}–${minToStr((i + 1) * (1440 / n))}`) });
+    return `<div class="chart" data-chart="${id}"><div class="chart-title"><h2>${title}</h2>${sub ? `<span>${esc(sub)}</span>` : ''}</div>
       <svg viewBox="0 0 ${CW} ${H}" role="img" aria-label="${esc(title)}">
-        <g class="grid">${grid}</g><g class="axis">${ylab}${xlab}</g>${nowLine}${paths}${labels}
+        <g class="grid">${grid}</g>${bandSvg}<g class="axis">${ylab}${xlab}</g>${paths}${labels}
         <line class="xh" x1="0" x2="0" y1="${T}" y2="${T + h}" stroke="${C.muted}" stroke-width="1" visibility="hidden"/>
         <rect class="hit" x="${L}" y="${T}" width="${w}" height="${h}"/></svg></div>`;
   }
@@ -1295,11 +1418,11 @@
         const r = svg.getBoundingClientRect();
         const x = ((e.clientX - r.left) / r.width) * CW;
         let html = '', cx = 0;
-        if (d.kind === 'hour') {
-          const i = Math.round(((x - d.L) / d.w) * 23);
-          if (i < 0 || i > 23) return;
+        if (d.kind === 'day') {
+          const i = Math.floor(((x - d.L) / d.w) * d.n);
+          if (i < 0 || i >= d.n) return;
           cx = d.X(i);
-          html = `${d.fmt(i)}: ${d.series.map((s) => `${s.name} ${s.values[i] == null ? '–' : nf1.format(s.values[i]) + d.unit}`).join(', ')}`;
+          html = `${d.fmt(i)}: ${d.series.map((s) => `${d.series.length > 1 ? `${s.name} ` : ''}${s.values[i] == null ? '–' : nf1.format(s.values[i]) + d.unit}`).join(', ')}`;
         } else if (d.kind === 'time') {
           const tt = d.t[0] + ((x - d.L) / d.w) * (d.t[d.t.length - 1] - d.t[0]);
           let i = 0; for (let k = 0; k < d.t.length; k++) if (Math.abs(d.t[k] - tt) < Math.abs(d.t[i] - tt)) i = k;
@@ -1329,7 +1452,7 @@
   function bindUI() {
     $$('.modes button').forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
     $$('#aTabs button').forEach((b) => b.addEventListener('click', () => {
-      S.tab = b.dataset.tab; closeDetail(true); updateHash(); enterAnalysis();
+      S.tab = b.dataset.tab; closeDetail(true); setData('qpt', EMPTY); updateHash(); enterAnalysis();
       b.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: REDUCED ? 'auto' : 'smooth' });
     }));
     for (const id of ['#liveLayers', '#tlLayers']) {
@@ -1373,7 +1496,8 @@
     $$('#tlSpan button').forEach((b) => b.addEventListener('click', () => {
       S.span = +b.dataset.h;
       $$('#tlSpan button').forEach((x) => x.setAttribute('aria-checked', String(x === b)));
-      if (S.tl) setupScrubber();
+      S.frame = -1;
+      if (S.mode === 'verlauf') enterTimeline();
     }));
     addEventListener('keydown', (e) => {
       if (S.mode !== 'verlauf' || !S.tl || /input|textarea/i.test(document.activeElement?.tagName) && document.activeElement.type !== 'range') return;
@@ -1385,11 +1509,16 @@
     });
 
     // analysis controls
-    $('#hRange').addEventListener('input', (e) => { S.hour = +e.target.value; stopHourPlay(); syncHourUI(); paintHour(); });
-    $('#hRange').addEventListener('change', () => { if (S.tab === 'dichte') renderDensity(); });
-    $('#hPlay').addEventListener('click', () => (S.hPlaying ? stopHourPlay() : startHourPlay()));
-    $$('#dayType button').forEach((b) => b.addEventListener('click', () => { S.day = b.dataset.d; syncHourUI(); renderTab(); }));
-    $$('#partBar button').forEach((b) => b.addEventListener('click', () => { S.part = +b.dataset.p; syncHourUI(); closeDetail(true); renderTab(); }));
+    const onWin = (e) => { S.f[e.target.id === 'wA' ? 'a' : 'b'] = +e.target.value; stopWindowPlay(); syncFilterUI(); saveFilter(); scheduleCompute(180); };
+    $('#wA').addEventListener('input', onWin);
+    $('#wB').addEventListener('input', onWin);
+    $('#wPlay').addEventListener('click', () => (S.wPlaying ? stopWindowPlay() : startWindowPlay()));
+    $('#fSummary').addEventListener('click', () => {
+      if (!isDesktop() && sheetState !== 'full') setSheet('full');
+      const el = $('#filters');
+      if (el) requestAnimationFrame(() => $('#scroll').scrollTo({ top: el.offsetTop - $('.mode[data-mode="analyse"] .peek').offsetHeight - 8, behavior: REDUCED ? 'auto' : 'smooth' }));
+    });
+    $('#tlEnd').addEventListener('change', (e) => { S.tlEnd = e.target.value || null; S.frame = -1; if (S.mode === 'verlauf') enterTimeline(); });
 
     // delegated actions inside the panel
     $('#panel').addEventListener('click', (e) => {
@@ -1404,8 +1533,12 @@
       else if (a === 'livebike') { setMode('live'); showBike(id); }
       else if (a === 'cleartrail') { S.trail = null; setData('trail', EMPTY); applyVisibility(); closeDetail(); }
       else if (a === 'frame') { S.frame = nearestFrame(+el.dataset.t); $('#tlRange').value = S.frame; renderFrame(); }
-      else if (a === 'cell') { const j = +el.dataset.j; showCell(j); flyTo(S.an.cellCenter(S.an.cells[j]), 14); }
-      else if (a === 'anst') showAnStation(+el.dataset.j);
+      else if (a === 'stq') stationQuery(id);
+      else if (a === 'pointme' && S.me) {
+        if (S.mode !== 'analyse' || S.tab !== 'verfuegbarkeit') { S.tab = 'verfuegbarkeit'; setMode('analyse'); }
+        setTimeout(() => { pointQuery(S.me[0], S.me[1]); applyVisibility(); flyTo(S.me, 14.5); }, 50);
+      }
+      else if (a === 'clearpoint') { S.sel = null; setData('qpt', EMPTY); applyVisibility(); closeDetail(); }
     });
     $('#near').addEventListener('click', (e) => { if (e.target.id === 'btnNear2') locate(false); });
 
@@ -1432,6 +1565,7 @@
   let liveReady;
   async function start() {
     readHash();
+    S.f = loadFilter();
     try { S.cfg = await getJSON('config.json'); } catch { S.cfg = { style_light: 'https://tiles.openfreemap.org/styles/positron', style_dark: 'https://tiles.openfreemap.org/styles/dark' }; }
     bindUI();
     initSheet();
@@ -1442,6 +1576,6 @@
     initMap(S.cfg);
   }
   window.__app = S; // for debugging and screenshots
-  window.__ui = { setMode, setSheet, showStation, showBike, showCell: (j) => showCell(j), flyTo };
+  window.__ui = { setMode, setSheet, showStation, showBike, pointQuery, stationQuery, flyTo };
   start();
 })();

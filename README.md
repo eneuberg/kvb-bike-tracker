@@ -8,7 +8,7 @@ Tracks every KVB-Rad bike in Köln via the public nextbike live API. It draws a 
 |---|---|
 | **Live** | All bikes right now: stations (count = bikes docked), free-floating bikes, optional density layer. Tap a bike for details and "untouched since", tap a station for its typical fill level. Search by bike number, nearest bikes from your location. |
 | **Verlauf** | Scrub or play through the last 7 days (10-min steps). The curve behind the slider is the estimated number of bikes in use. "Weg anzeigen" draws where a single bike stood over the days. |
-| **Analyse** | *Verfügbarkeit*: chance of at least one bike in a 250 m cell / ~400 m radius, per hour, weekday vs. weekend. *Dichte*: average parked bikes per hour. *Nutzung*: bikes in use and trips by hour, trip duration and distance. *Ströme*: net in/outflow per cell and the most frequent connections by time of day. *Stationen*: chance a station is empty per hour. *Standzeit*: how long bikes stand untouched. |
+| **Analyse** | Everything is computed in your browser from the raw history, so all parameters are free: date range, any weekdays, any time window (also across midnight), plus per view: *Verfügbarkeit* (chance of at least one bike within a chosen radius, tap anywhere for an exact profile of that spot), *Dichte* (average parked bikes per hectare, adjustable smoothing), *Nutzung* (bikes in use, trips per hour, duration and distance; trip-detection thresholds adjustable), *Ströme* (net in/outflow and top connections; area size, count, minimum adjustable), *Stationen* (chance a station has at most *k* bikes), *Standzeit* (bikes untouched for at least *n* days). |
 
 The map uses MapLibre GL with [OpenFreeMap](https://openfreemap.org) vector tiles (free, no key), so markers and heatmaps scale smoothly while zooming. It works on phones (bottom sheet) and desktop (side panel), in light and dark mode.
 
@@ -80,9 +80,9 @@ In Coolify: **New Resource → Docker Compose → this repo**, assign a domain t
 | `MOVE_THRESHOLD_M` | `25` | movement threshold for `moved` events |
 | `RENDER_PNG` | `true` | render `map.png` / `heatmap.png` on each update |
 | `TILE_API_KEY` | – | free [CARTO basemap key](https://carto.com/basemaps/apikey) for the PNG renders; see *Basemap* below |
-| `ANALYSIS_DAYS` | `56` | window for the statistics in *Analyse* |
-| `TIMELINE_DAYS` | `7` | how far back *Verlauf* goes |
-| `ANALYSIS_INTERVAL_MINUTES` | `30` | container only: recompute statistics at most this often |
+| `ANALYSIS_DAYS` | `56` | how many days of history the web app can load (Verlauf and Analyse) |
+| `TIMELINE_STEP_MINUTES` | `10` | minimum spacing of exported polls (matters for 1-minute polling) |
+| `ANALYSIS_INTERVAL_MINUTES` | `30` | container only: re-export the history at most this often |
 
 The container serves `/` (interactive map), `/map.png`, `/heatmap.png`, `/latest.json` (current state) and `/history/` (all CSVs).
 
@@ -106,6 +106,6 @@ The tests use a synthetic feed and need no network.
 
 - **Data source:** `api.nextbike.net/maps/nextbike-live.json`. It's public but undocumented, so nextbike can change it without notice. Use moderate poll intervals.
 - **Rentals are inferred:** the feed shows only parked bikes, not rides. "Trips" come from `gone` → `new` pairs and are therefore approximations.
-- **Analysis method:** `tracker/analysis.py` replays the CSV history poll by poll. Trips are inferred: a bike leaves the feed and reappears ≥ 100 m away (absences over 4 h count as service), or jumps > 300 m between two polls. Rebalancing by van can't be separated reliably. Hours use Europe/Berlin local time; public holidays count as normal weekdays.
+- **Analysis method:** `tracker/analysis.py` replays the CSV history and writes one compact file per day (`tl/YYYY-MM-DD.json`: full state at the first poll, then per-poll changes). `tracker/web/worker.js` loads the selected days in a Web Worker and computes everything there. Rasters (availability, density) are drawn as smoothly interpolated images; tap queries are computed exactly for the point. Trips are inferred: a bike leaves the feed and reappears at least *x* m away (default 100 m; absences over 4 h count as service), or jumps more than *y* m between two polls (default 300 m). Rebalancing by van can't be separated reliably. Hours use Europe/Berlin local time; public holidays count as normal weekdays.
 - **Basemap:** CARTO now requires a free API key ([request one](https://carto.com/basemaps/apikey)). The interactive map uses OpenFreeMap. With `TILE_API_KEY` set, the PNG renders use CARTO light tiles (© OpenStreetMap contributors © CARTO; free up to 5M non-commercial requests/month). Without a key the PNGs are drawn without a basemap. OSM's [tile policy](https://operations.osmfoundation.org/policies/tiles/) forbids pre-fetching tiles server-side.
 - **Schedule:** in public repos, GitHub pauses scheduled workflows after 60 days without repo activity. The history commits should keep this repo active.

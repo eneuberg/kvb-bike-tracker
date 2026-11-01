@@ -104,11 +104,14 @@
       <div class="detail" id="detailTl" hidden></div>
       <div class="more">
         <div class="block">
+          <h2>Zeitraum</h2>
           <div class="seg" id="tlSpan" role="radiogroup" aria-label="Zeitraum">
             <button role="radio" data-h="24" aria-checked="false">24 h</button>
             <button role="radio" data-h="72" aria-checked="false">3 Tage</button>
             <button role="radio" data-h="168" aria-checked="true">7 Tage</button>
+            <button role="radio" data-h="336" aria-checked="false">14 Tage</button>
           </div>
+          <label class="field">bis einschließlich <input type="date" id="tlEnd"></label>
         </div>
         <div class="block">
           <div class="stats small">
@@ -142,29 +145,21 @@
           <button role="tab" data-tab="stationen" aria-selected="false">Stationen</button>
           <button role="tab" data-tab="standzeit" aria-selected="false">Standzeit</button>
         </div>
-        <div class="hourbar" id="hourBar">
-          <button class="play" id="hPlay" type="button" aria-label="Tagesverlauf abspielen">
+        <div class="timebar" id="timeBar">
+          <button class="play" id="wPlay" type="button" aria-label="Zeitfenster durch den Tag laufen lassen">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-play" d="M8 5.5v13l11-6.5z"/><path class="i-pause" d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>
           </button>
-          <div class="hour-main">
-            <div class="hour-label"><b id="hLabel">17 Uhr</b>
-              <div class="seg mini" id="dayType" role="radiogroup" aria-label="Wochentage">
-                <button role="radio" data-d="wd" aria-checked="true">Mo–Fr</button>
-                <button role="radio" data-d="we" aria-checked="false">Sa/So</button>
-                <button role="radio" data-d="all" aria-checked="false">Alle</button>
-              </div>
+          <div class="tw-main">
+            <div class="tw-label"><b id="wLabel">08:00–09:00</b><span id="wDays">Mo–Fr</span></div>
+            <div class="dual" id="wDual">
+              <div class="dual-fill" id="wFill"></div>
+              <input type="range" id="wA" min="0" max="96" step="1" value="32" aria-label="Zeitfenster Beginn">
+              <input type="range" id="wB" min="0" max="96" step="1" value="36" aria-label="Zeitfenster Ende">
             </div>
-            <input type="range" id="hRange" min="0" max="23" value="17" step="1" aria-label="Uhrzeit">
             <div class="ticks hours" aria-hidden="true"><span>0</span><span>6</span><span>12</span><span>18</span><span>24</span></div>
           </div>
         </div>
-        <div class="seg" id="partBar" role="radiogroup" aria-label="Tageszeit" hidden>
-          <button role="radio" data-p="-1" aria-checked="true">Ganzer Tag</button>
-          <button role="radio" data-p="0" aria-checked="false">Morgen</button>
-          <button role="radio" data-p="1" aria-checked="false">Mittag</button>
-          <button role="radio" data-p="2" aria-checked="false">Abend</button>
-          <button role="radio" data-p="3" aria-checked="false">Nacht</button>
-        </div>
+        <button class="fsum" id="fSummary" type="button"><span id="fSumText">Filter</span><b>Filter ändern</b></button>
         <div class="legend" id="aLegend"></div>
       </div>
       <div class="detail" id="detailA" hidden></div>

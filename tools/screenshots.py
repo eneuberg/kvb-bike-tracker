@@ -23,6 +23,9 @@ PICK_BIKE = """() => { const b = window.__app.live.bikes.find((x) => x.kind !== 
 MID_FRAME = """() => { const r = document.querySelector('#tlRange'); r.value = Math.round(+r.min + (+r.max - +r.min) * 0.6);
   r.dispatchEvent(new Event('input')); }"""
 HALF = "() => window.__ui.setSheet('half')"
+POINT = "() => window.__ui.pointQuery(6.9583, 50.9413)"
+FILTER_OPEN = "() => document.querySelector('#fSummary').click()"
+PREP = """() => { localStorage.setItem('kvb-filter', JSON.stringify({ range: 'all', wd: [1,1,1,1,1,1,1], a: 0, b: 96 })); }"""
 FULL = "() => window.__ui.setSheet('full')"
 
 SHOTS = [
@@ -32,6 +35,8 @@ SHOTS = [
     ("phone-verlauf", PHONE, "#verlauf", [MID_FRAME]),
     ("phone-verlauf-half", PHONE, "#verlauf", [MID_FRAME, HALF]),
     ("phone-verfuegbarkeit", PHONE, "#analyse/verfuegbarkeit", []),
+    ("phone-verfuegbarkeit-punkt", PHONE, "#analyse/verfuegbarkeit", [POINT]),
+    ("phone-filter", PHONE, "#analyse/verfuegbarkeit", [FILTER_OPEN]),
     ("phone-dichte", PHONE, "#analyse/dichte", []),
     ("phone-nutzung", PHONE, "#analyse/nutzung", [FULL]),
     ("phone-stroeme", PHONE, "#analyse/stroeme", []),
@@ -62,7 +67,10 @@ def main(site: str, out: str) -> int:
             errs: list[str] = []
             page.on("pageerror", lambda e, errs=errs: errs.append(str(e)))
             page.on("console", lambda m, errs=errs: errs.append(m.text) if m.type == "error" else None)
+            page.goto(f"http://127.0.0.1:8765/")
+            page.evaluate(PREP)  # whole day, all days: shows the most data while history is short
             page.goto(f"http://127.0.0.1:8765/{hash_}")
+            page.reload()
             try:
                 page.wait_for_function("() => window.__app && window.__app.live && document.querySelector('.maplibregl-canvas')", timeout=20000)
                 page.wait_for_load_state("networkidle", timeout=20000)

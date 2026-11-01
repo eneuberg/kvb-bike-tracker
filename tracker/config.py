@@ -88,9 +88,8 @@ class Config:
     publish_history_days: int = 31  # static site only: days of history copied into Pages
 
     # Analysis
-    analysis_days: float = 56         # window for availability / usage statistics
-    timeline_days: float = 7          # how far back the timeline scrubber goes
-    timeline_step_minutes: float = 10 # min spacing of timeline frames
+    analysis_days: float = 56         # how many days of history the web app can load
+    timeline_step_minutes: float = 10 # min spacing of exported polls
     analysis_interval_minutes: float = 30  # serve mode: recompute at most this often
 
     # Server
@@ -124,7 +123,6 @@ class Config:
             web_style_light=_env("WEB_STYLE_LIGHT", cls.web_style_light),
             web_style_dark=_env("WEB_STYLE_DARK", cls.web_style_dark),
             analysis_days=float(_env("ANALYSIS_DAYS", "56")),
-            timeline_days=float(_env("TIMELINE_DAYS", "7")),
             timeline_step_minutes=float(_env("TIMELINE_STEP_MINUTES", "10")),
             analysis_interval_minutes=float(_env("ANALYSIS_INTERVAL_MINUTES", "30")),
             port=int(_env("PORT", "8080")),

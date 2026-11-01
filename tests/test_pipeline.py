@@ -89,20 +89,26 @@ def test_tile_config(monkeypatch):
     assert "CARTO" in cfg.tile_attribution
 
 
-def test_analysis_on_simulated_history(tmp_path):
-    from tracker.analysis import analyze
+def test_export_on_simulated_history(tmp_path):
+    from tracker.analysis import export
 
     from .simulate import simulate
 
     simulate(tmp_path / "history", days=1.5, step_min=30)
-    res = analyze(tmp_path / "history", analysis_days=56, timeline_days=7)
-    a, tl = res["analysis"], res["timeline"]
-    assert a["window"]["polls"] == 72
-    assert a["usage"]["totals"]["trips"] > 50
-    assert len(a["cells"]) > 100
-    assert sum(1 for v in a["n"]["wd"] + a["n"]["we"] if v) == 24  # every hour covered once or more
-    # timeline replays to the same bike count as the history
-    assert len(tl["t"]) == 72 and tl["total"][-1] > 0
-    first = tl["frames"][0]
-    assert len(first) // 4 == tl["total"][0]
+    res = export(tmp_path / "history", days=56, step_s=600)
+    days = res["index"]["days"]
+    assert sum(d["n"] for d in days) == 72
+    for d in days:
+        day = res["days"][d["date"]]
+        # first frame of a day is a full snapshot that refers only to local tables
+        first = day["frames"][0]
+        assert len(first) % 4 == 0 and len(first) // 4 > 1000
+        assert max(first[0::4]) < len(day["bikes"])
+        assert all(-1 <= s < len(day["stations"]) for s in first[3::4])
+        # replaying the deltas never refers to unknown bikes
+        present = set()
+        for fr, gone in zip(day["frames"], day["gone"]):
+            present.update(fr[0::4])
+            assert set(gone) <= present
+            present -= set(gone)
     assert res["since"]
