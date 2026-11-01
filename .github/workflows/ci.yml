@@ -28,12 +28,12 @@ jobs:
       - run: docker build -t kvb-bike-tracker .
       - name: Smoke test container against the live API
         run: |
-          docker run -d --name t -p 8080:8080 -e UPDATE_INTERVAL_MINUTES=1 kvb-bike-tracker
+          docker run -d --name kvb-test -p 8080:8080 -e UPDATE_INTERVAL_MINUTES=1 kvb-bike-tracker
           for i in $(seq 1 30); do
             if curl -fsS localhost:8080/latest.json -o latest.json; then break; fi
             sleep 3
           done
-          docker logs t
+          docker logs kvb-test
           python3 -c "import json; d=json.load(open('latest.json')); c=d['meta']['counts']; print(c); assert c['total'] > 0"
           curl -fsS -o /dev/null localhost:8080/map.png
           curl -fsS -o /dev/null localhost:8080/heatmap.png
