@@ -76,3 +76,14 @@ def test_render_site(tmp_path):
     written = render.write_site(cfg, bikes, stations, meta)
     names = {p.name for p in written}
     assert {"latest.json", "index.html", "map.png", "heatmap.png"} <= names
+
+
+def test_tile_config(monkeypatch):
+    for k in ("TILE_API_KEY", "CARTO_API_KEY", "TILE_URL", "WEB_TILE_URL"):
+        monkeypatch.delenv(k, raising=False)
+    cfg = Config.from_env()
+    assert cfg.tile_url == "" and "openstreetmap" in cfg.web_tile_url
+    monkeypatch.setenv("TILE_API_KEY", "abc")
+    cfg = Config.from_env()
+    assert cfg.tile_url.endswith("?key=abc") and cfg.web_tile_url == cfg.tile_url
+    assert "CARTO" in cfg.tile_attribution

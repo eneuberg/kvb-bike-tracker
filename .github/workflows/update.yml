@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: "*/15 * * * *"   # every 15 min (UTC); GitHub may start runs late under load
   workflow_dispatch:
+    inputs:
+      preview:
+        description: "Also push map.png / heatmap.png to the 'preview' branch"
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
@@ -44,6 +49,8 @@ jobs:
           key: tiles-${{ hashFiles('tracker/tiles.py') }}
 
       - name: Fetch bikes, record history, render map
+        env:
+          TILE_API_KEY: ${{ secrets.TILE_API_KEY }}   # free CARTO basemap key (optional)
         run: python -m tracker once --publish-history
 
       - name: Commit history
@@ -60,6 +67,14 @@ jobs:
             sleep $((i * 5))
           done
           echo "push failed after retries"; exit 1
+
+      - name: Push preview images
+        if: ${{ inputs.preview }}
+        run: |
+          tmp=$(mktemp -d); cp data/site/map.png data/site/heatmap.png "$tmp"/
+          git checkout -q --orphan preview && git rm -rqf . && cp "$tmp"/*.png .
+          git add map.png heatmap.png && git commit -q -m "preview $(date -u +%FT%TZ)"
+          git push -qf origin preview
 
       - uses: actions/configure-pages@v5
         with:

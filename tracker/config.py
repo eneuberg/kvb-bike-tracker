@@ -24,6 +24,31 @@ def _interval_seconds() -> int:
     return max(int(seconds), 60)
 
 
+CARTO_URL = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png?key={key}"
+CARTO_ATTR = "© OpenStreetMap contributors © CARTO"
+OSM_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+OSM_ATTR = "© OpenStreetMap contributors"
+
+
+def _tiles() -> dict:
+    key = _env("TILE_API_KEY") or _env("CARTO_API_KEY")
+    if key:
+        default_url, default_attr = CARTO_URL.replace("{key}", key), CARTO_ATTR
+        web_url, web_attr = default_url, CARTO_ATTR
+    else:
+        default_url, default_attr = "", ""
+        web_url, web_attr = OSM_URL, OSM_ATTR
+    tile_url = _env("TILE_URL", default_url)
+    tile_attr = _env("TILE_ATTRIBUTION", default_attr if tile_url == default_url else "")
+    return {
+        "tile_api_key": key,
+        "tile_url": tile_url,
+        "tile_attribution": tile_attr,
+        "web_tile_url": _env("WEB_TILE_URL", web_url),
+        "web_tile_attribution": _env("WEB_TILE_ATTRIBUTION", web_attr),
+    }
+
+
 @dataclass
 class Config:
     # Data source
@@ -45,8 +70,17 @@ class Config:
     user_agent: str = "kvb-bike-tracker (+https://github.com/eneuberg/kvb-bike-tracker)"
 
     # Rendering
-    tile_url: str = "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
-    tile_attribution: str = "© OpenStreetMap contributors © CARTO"
+    # Basemap tiles. CARTO now requires a (free) key: https://carto.com/basemaps/apikey
+    #   with TILE_API_KEY:    CARTO light tiles for the PNGs and the interactive map
+    #   without a key:        interactive map uses OpenStreetMap's standard tiles
+    #                         (allowed for maps a person is viewing); the PNGs get no
+    #                         basemap, because OSM's tile policy forbids server-side
+    #                         pre-fetching.
+    tile_api_key: str | None = None
+    tile_url: str = ""              # server-side PNG basemap; "" = none
+    tile_attribution: str = ""
+    web_tile_url: str = ""          # browser map
+    web_tile_attribution: str = ""
     image_width: int = 1400
     render_png: bool = True
     publish_history_days: int = 31  # static site only: days of history copied into Pages
@@ -75,8 +109,7 @@ class Config:
             battery_threshold=int(_env("BATTERY_THRESHOLD", "5")),
             request_timeout=int(_env("REQUEST_TIMEOUT", "30")),
             user_agent=_env("USER_AGENT", cls.user_agent),
-            tile_url=_env("TILE_URL", cls.tile_url),
-            tile_attribution=_env("TILE_ATTRIBUTION", cls.tile_attribution),
+            **_tiles(),
             image_width=int(_env("IMAGE_WIDTH", "1400")),
             render_png=_env("RENDER_PNG", "true").lower() not in ("0", "false", "no"),
             publish_history_days=int(_env("PUBLISH_HISTORY_DAYS", "31")),

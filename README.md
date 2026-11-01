@@ -57,7 +57,7 @@ The Pages site mirrors the last 31 days at `/history/`. The repo keeps everythin
 ### GitHub Actions (this repo)
 `.github/workflows/update.yml` runs every 15 minutes. It fetches, commits history, and deploys the map to GitHub Pages. You can trigger it by hand under **Actions → update map → Run workflow**.
 
-One-time setup: **Settings → Pages → Source: GitHub Actions**.
+One-time setup: **Settings → Pages → Source: GitHub Actions**. Optionally add a repository secret `TILE_API_KEY` (see *Basemap*).
 
 ### Coolify / Docker
 `docker-compose.yml` runs a long-lived container that polls on its own schedule and serves the map on port 8080. History lives in the `tracker-data` volume.
@@ -71,6 +71,7 @@ In Coolify: **New Resource → Docker Compose → this repo**, assign a domain t
 | `NEXTBIKE_CITY_ID` | – | restrict to one nextbike city UID instead |
 | `MOVE_THRESHOLD_M` | `25` | movement threshold for `moved` events |
 | `RENDER_PNG` | `true` | render `map.png` / `heatmap.png` on each update |
+| `TILE_API_KEY` | – | free [CARTO basemap key](https://carto.com/basemaps/apikey); see *Basemap* below |
 
 The container serves `/` (interactive map), `/map.png`, `/heatmap.png`, `/latest.json` (current state) and `/history/` (all CSVs).
 
@@ -94,5 +95,5 @@ The tests use a synthetic feed and need no network.
 
 - **Data source:** `api.nextbike.net/maps/nextbike-live.json`. It's public but undocumented, so nextbike can change it without notice. Use moderate poll intervals.
 - **Rentals are inferred:** the feed shows only parked bikes, not rides. "Trips" come from `gone` → `new` pairs and are therefore approximations.
-- **Basemap:** © OpenStreetMap contributors © CARTO. The tiles are cached; CARTO's free tier is for non-commercial use.
+- **Basemap:** CARTO now requires a free API key ([request one](https://carto.com/basemaps/apikey)). With `TILE_API_KEY` set, the PNGs and the web map use CARTO light tiles (© OpenStreetMap contributors © CARTO; free up to 5M non-commercial requests/month). Without a key, the web map falls back to OpenStreetMap's standard tiles and the PNGs are drawn without a basemap. OSM's [tile policy](https://operations.osmfoundation.org/policies/tiles/) forbids pre-fetching tiles server-side. Note: the key is visible in the public web map's source, so restrict it in the CARTO dashboard if you can.
 - **Schedule:** in public repos, GitHub pauses scheduled workflows after 60 days without repo activity. The history commits should keep this repo active.

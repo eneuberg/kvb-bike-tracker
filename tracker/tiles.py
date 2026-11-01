@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import logging
 import math
+import re
 from pathlib import Path
 
 import requests
@@ -53,8 +55,14 @@ class Basemap:
         x, y = lnglat_to_px(lng, lat, self.z)
         return x - self.x0, y - self.y0
 
+    def _cache_root(self) -> Path:
+        # one cache per tile source (key stripped), so switching provider or
+        # adding a key never reuses old tiles
+        template = re.sub(r"([?&](key|api_key|access_token)=)[^&]*", r"\1", self.cfg.tile_url)
+        return self.cfg.tile_cache_dir / hashlib.sha1(template.encode()).hexdigest()[:10]
+
     def _tile(self, x: int, y: int) -> Image.Image | None:
-        cache = self.cfg.tile_cache_dir / str(self.z) / str(x) / f"{y}.png"
+        cache = self._cache_root() / str(self.z) / str(x) / f"{y}.png"
         if cache.exists():
             try:
                 return Image.open(cache).convert("RGB")
@@ -67,7 +75,8 @@ class Basemap:
             resp.raise_for_status()
             img = Image.open(io.BytesIO(resp.content)).convert("RGB")
         except (requests.RequestException, OSError) as exc:
-            log.warning("tile %s failed: %s", url, exc)
+            safe = re.sub(r"([?&](key|api_key|access_token)=)[^&]*", r"\1***", url)
+            log.warning("tile %s failed: %s", safe, str(exc).replace(self.cfg.tile_api_key or "\0", "***"))
             return None
         cache.parent.mkdir(parents=True, exist_ok=True)
         img.save(cache)
@@ -75,6 +84,8 @@ class Basemap:
 
     def _stitch(self) -> Image.Image:
         canvas = Image.new("RGB", (self.width, self.height), (236, 236, 233))
+        if not self.cfg.tile_url:
+            return canvas
         tx0, ty0 = int(self.x0 // TILE), int(self.y0 // TILE)
         tx1 = int((self.x0 + self.width) // TILE)
         ty1 = int((self.y0 + self.height) // TILE)

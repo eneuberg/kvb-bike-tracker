@@ -49,10 +49,11 @@ def _legend(img: Image.Image, lines: list[tuple[str, tuple[int, int, int] | None
         else:
             draw.text((10 + pad, y), text, fill=C_TEXT, font=font)
         y += lh
-    tw = draw.textlength(attribution, font=small)
-    draw.rectangle((img.width - tw - 12, img.height - 20, img.width, img.height),
-                   fill=(255, 255, 255, 200))
-    draw.text((img.width - tw - 6, img.height - 17), attribution, fill=(90, 90, 90), font=small)
+    if attribution:
+        tw = draw.textlength(attribution, font=small)
+        draw.rectangle((img.width - tw - 12, img.height - 20, img.width, img.height),
+                       fill=(255, 255, 255, 200))
+        draw.text((img.width - tw - 6, img.height - 17), attribution, fill=(90, 90, 90), font=small)
 
 
 def render_markers_png(cfg: Config, basemap: Basemap, bikes: list[dict[str, Any]],
@@ -246,7 +247,9 @@ def write_site(cfg: Config, bikes: list[dict[str, Any]], stations: list[dict[str
                                  separators=(",", ":"), ensure_ascii=False), encoding="utf-8")
     written.append(latest)
 
-    html = HTML_TEMPLATE.replace("__TILE_URL__", cfg.tile_url).replace("__ATTRIBUTION__", cfg.tile_attribution)
+    html = (HTML_TEMPLATE
+            .replace("__TILE_URL__", cfg.web_tile_url.replace("'", "%27"))
+            .replace("__ATTRIBUTION__", cfg.web_tile_attribution.replace("'", "\\'")))
     index = site / "index.html"
     index.write_text(html, encoding="utf-8")
     written.append(index)
