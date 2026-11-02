@@ -463,22 +463,22 @@
   }
   function renderPop() {
     const L = S.live, st = FR.st, auto = st?.auto_s || 900;
-    $('#fpTime').textContent = L ? `Stand ${fTime.format(new Date(L.t * 1000))} Uhr` : 'lädt …';
+    $('#fpTime').textContent = L ? `Stand ${fTime.format(new Date(L.t * 1000))}` : 'lädt …';
     $('#fpAge').textContent = L ? `vor ${fmtDur(Math.max(0, now() - L.t))}` : '';
-    const btn = $('#fpBtn'), next = L ? L.t + auto : null;
+    const btn = $('#fpBtn'), next = L ? L.t + auto : null, hint = $('#fpHint');
     if (serverMode()) {
-      const due = next != null && next - now() > 30 ? `nächste etwa ${fTime.format(new Date(next * 1000))} Uhr` : 'nächste läuft gleich';
-      $('#fpAuto').textContent = `Automatisch alle ${Math.round(auto / 60)} Min. abgefragt, ${due}. Neue Daten erscheinen hier von selbst.`;
-      const w = manualWait();
+      const due = next != null && next - now() > 30 ? fTime.format(new Date(next * 1000)) : 'gleich';
+      $('#fpAuto').textContent = `Automatisch alle ${Math.round(auto / 60)} Min. · nächste ${due}`;
+      const w = manualWait(), m = Math.max(1, Math.round(st.manual_s / 60));
       btn.disabled = FR.polling || w > 0;
-      btn.textContent = FR.polling ? 'Frage nextbike ab …' : w > 0 ? `Wieder möglich in ${clock(w)}` : 'Jetzt neu abfragen';
-      const m = Math.max(1, Math.round(st.manual_s / 60));
-      $('#fpHint').textContent = `Neu abfragen geht für alle Besucher zusammen höchstens ${m === 1 ? 'einmal pro Minute' : `alle ${m} Minuten`}, damit die Schnittstelle von nextbike nicht überlastet wird. Abfragen von dir und anderen setzen die Wartezeit zurück.`;
+      btn.textContent = FR.polling ? 'Fragt ab …' : w > 0 ? `Wieder in ${clock(w)}` : 'Jetzt abfragen';
+      hint.textContent = `Für alle zusammen höchstens alle ${m} Min.`;
+      hint.hidden = false;
     } else {
-      $('#fpAuto').textContent = `Automatisch etwa alle ${Math.round(auto / 60)} Min. über GitHub. GitHub startet geplante Läufe aber unregelmäßig, Lücken von mehreren Stunden kommen vor.`;
+      $('#fpAuto').textContent = `Automatisch ca. alle ${Math.round(auto / 60)} Min. (GitHub, mit Lücken)`;
       btn.disabled = FR.busy;
-      btn.textContent = FR.busy ? 'Prüfe …' : 'Auf neue Daten prüfen';
-      $('#fpHint').textContent = 'Selbst eine neue Abfrage auslösen geht nur in der selbst gehosteten Version (Docker/Coolify). Hier wird nur nachgesehen, ob GitHub inzwischen neue Daten veröffentlicht hat.';
+      btn.textContent = FR.busy ? 'Prüft …' : 'Auf neue Daten prüfen';
+      hint.hidden = true;
     }
     $('#fpNew').hidden = !FR.newApp;
   }
@@ -504,12 +504,12 @@
     try {
       const r = await fetch('api/refresh', { method: 'POST' });
       const b = await r.json().catch(() => ({}));
-      if (r.status === 429) { FR.lockUntil = now() + (b.retry_after || 60); toast(`Gerade wurde schon abgefragt. Wieder möglich in ${clock(b.retry_after || 60)}.`); }
-      else if (r.status === 409) { toast('Eine Abfrage läuft gerade, die Daten kommen gleich.'); await new Promise((ok) => setTimeout(ok, 5000)); }
-      else if (!r.ok) toast('nextbike hat gerade nicht geantwortet. Bitte später noch einmal versuchen.');
+      if (r.status === 429) { FR.lockUntil = now() + (b.retry_after || 60); toast(`Wieder in ${clock(b.retry_after || 60)} möglich.`); }
+      else if (r.status === 409) { toast('Läuft gerade …'); await new Promise((ok) => setTimeout(ok, 5000)); }
+      else if (!r.ok) toast('nextbike antwortet gerade nicht.');
       await checkUpdate(false);
-      if (r.ok && S.live?.meta?.ts !== before) toast(`Neu abgefragt: Stand ${fTime.format(new Date(S.live.t * 1000))} Uhr.`);
-    } catch { toast('Keine Verbindung zum Server.'); }
+      if (r.ok && S.live?.meta?.ts !== before) toast(`Aktuell: ${fTime.format(new Date(S.live.t * 1000))}`);
+    } catch { toast('Keine Verbindung.'); }
     finally { FR.polling = false; renderFresh(); }
   }
   async function refreshHistory() {
@@ -543,8 +543,7 @@
       if (ts == null || ts !== before) await loadLive(true);
       const fresh = S.live?.meta?.ts !== before;
       const hist = fresh || manual ? await refreshHistory() : false;
-      if (manual && S.live) toast(fresh || hist ? `Aktualisiert: Stand ${fmtWhen(S.live.t)}.`
-        : `Schon aktuell. Die letzte Abfrage war ${fmtWhen(S.live.t)}, neuere Daten gibt es noch nicht.`);
+      if (manual && S.live) toast(fresh || hist ? `Aktuell: ${fTime.format(new Date(S.live.t * 1000))}` : 'Noch keine neueren Daten.');
       FR.last = now();
       scheduleAutoCheck();
     } finally { FR.busy = false; renderFresh(); }
