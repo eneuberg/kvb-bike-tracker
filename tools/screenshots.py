@@ -26,7 +26,7 @@ HALF = "() => window.__ui.setSheet('half')"
 POINT = "() => window.__ui.pointQuery(6.9583, 50.9413)"
 FILTER_OPEN = "() => document.querySelector('.mode:not([hidden]) .more-toggle').click()"
 PLAY = "() => { const T = window.__app.tl; if (T) { window.__ui.setFrame(Math.max(T.i0, T.t.length - 6)); window.__ui.startPlay(); } }"
-PREP = """() => { localStorage.setItem('kvb-filter-v3', JSON.stringify({ range: 'all', wd: [1,1,1,1,1,1,1], a: 0, b: 96 })); }"""
+PREP = """() => { localStorage.setItem('kvb-filter-v4', JSON.stringify({ range: 'all', wd: [1,1,1,1,1,1,1], a: 0, b: 96 })); }"""
 FULL = "() => window.__ui.setSheet('full')"
 
 SHOTS = [

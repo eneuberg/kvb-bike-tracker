@@ -88,6 +88,7 @@
     const n = parseInt(c.slice(1), 16), f = k / (cols.length - 1);
     return [f, (n >> 16) & 255, (n >> 8) & 255, n & 255, a0 + (a1 - a0) * f];
   });
+  const rasterCv = document.createElement('canvas');
   const PIXEL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 
   // ================================================================ state
@@ -893,26 +894,32 @@
 
   // ================================================================ ANALYSE: filters
   const WD_NAMES = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
-  const FILTER_KEY = 'kvb-filter-v3';
+  const FILTER_KEY = 'kvb-filter-v4';
   const DEFAULT_F = () => {
     const h = localHour(now());
-    return { range: 14, from: null, to: null, wd: [1, 1, 1, 1, 1, 1, 1], a: h * 4, b: ((h + 1) % 24) * 4 || 96,
+    return { range: 14, from: null, to: null, wd: [1, 1, 1, 1, 1, 1, 1], a: h * 4, b: h * 4 + 4,
       kind: 'all', reachMetric: 'median', R: 200, res: 50, smooth: 75,
       minGone: 100, jump: 300, maxDurH: 4, cell: 250, top: 150, min: 1,
       stMetric: 'avg', k: 0, idleMin: 0 };
   };
   function loadFilter() {
-    try { const s = JSON.parse(localStorage.getItem(FILTER_KEY) || 'null'); if (s && Array.isArray(s.wd)) return { ...DEFAULT_F(), ...s }; } catch { /* ignore */ }
+    try { const s = JSON.parse(localStorage.getItem(FILTER_KEY) || 'null'); if (s && Array.isArray(s.wd)) return normWin({ ...DEFAULT_F(), ...s }); } catch { /* ignore */ }
     return DEFAULT_F();
   }
+  // the time window is always start < end within one day (00:00–24:00), in 15-min steps
+  function normWin(f) {
+    let a = Math.round(+f.a), b = Math.round(+f.b);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) { a = 0; b = 96; }
+    a = Math.min(95, Math.max(0, a)); b = Math.min(96, Math.max(1, b));
+    if (b <= a) { a = 0; b = 96; }
+    f.a = a; f.b = b;
+    return f;
+  }
+  const wholeDay = () => S.f.a === 0 && S.f.b === 96;
   function saveFilter() { try { localStorage.setItem(FILTER_KEY, JSON.stringify(S.f)); } catch { /* ignore */ } }
 
-  const winMin = () => ({ t0: S.f.a * 15, t1: (S.f.b * 15) % 1440 });
-  const winLabel = () => {
-    const { a, b } = S.f;
-    if (a === b || (a === 0 && b === 96) || (a === 96 && b === 0)) return 'ganzer Tag';
-    return `${minToStr(a * 15)}–${b === 96 ? '24:00' : minToStr(b * 15)}`;
-  };
+  const winMin = () => (wholeDay() ? { t0: 0, t1: 0 } : { t0: S.f.a * 15, t1: S.f.b * 15 });
+  const winLabel = () => (wholeDay() ? 'ganzer Tag' : `${minToStr(S.f.a * 15)}–${S.f.b === 96 ? '24:00' : minToStr(S.f.b * 15)}`);
   const wdLabel = (wd = S.f.wd) => {
     const key = wd.map((x) => (x ? 1 : 0)).join('');
     if (key === '1111111') return 'alle Tage';
@@ -958,7 +965,7 @@
     },
     stroeme: {
       lead: 'Wohin fahren die Räder?',
-      how: `<p>Eine Fahrt wird geschätzt, wenn ein Rad aus dem Feed verschwindet und an anderer Stelle wieder auftaucht, oder zwischen zwei Abfragen weit springt. Zugeordnet wird sie ihrer Startzeit.</p>
+      how: `<p>Eine Fahrt wird geschätzt, wenn ein Rad aus dem Feed verschwindet und an anderer Stelle wieder auftaucht, oder zwischen zwei Abfragen weit springt. Zugeordnet wird sie ihrer Startzeit. Liegen zwischen zwei Abfragen mehr als eine Stunde (ausgefallene Abfragen), ist der Zeitpunkt unklar, solche Bewegungen werden nicht gezählt.</p>
         <ul><li><b>Linien</b>: die häufigsten Verbindungen zwischen Start- und Zielbereich. Die Punkte wandern in Fahrtrichtung, dickere Linie bedeutet mehr Fahrten.</li>
         <li><b>Kreise</b>: Bilanz je Bereich. Rot heißt, hier beginnen mehr Fahrten als enden (Räder fließen ab), blau das Gegenteil. Größe = Anzahl.</li></ul>
         <p>Mit ▶ wandert das Zeitfenster durch den Tag. Einzelne Fahrten in Echtzeit zeigt die Ansicht „Karte“ beim Abspielen.</p>`,
@@ -987,12 +994,9 @@
     $('#wA').value = a; $('#wB').value = b;
     $('#wLabel').textContent = winLabel();
     $('#wDays').textContent = wdLabel();
-    const fill = $('#wFill'), pa = a / 96, pb = b / 96;
-    if (a <= b) { fill.style.left = `calc(12px + (100% - 24px) * ${pa})`; fill.style.width = `calc((100% - 24px) * ${pb - pa})`; fill.style.background = ''; }
-    else {
-      fill.style.left = '12px'; fill.style.width = 'calc(100% - 24px)';
-      fill.style.background = `linear-gradient(90deg, var(--ink) ${pb * 100}%, transparent ${pb * 100}%, transparent ${pa * 100}%, var(--ink) ${pa * 100}%)`;
-    }
+    const fill = $('#wFill');
+    fill.style.left = `calc(12px + (100% - 24px) * ${a / 96})`; fill.style.width = `calc((100% - 24px) * ${(b - a) / 96})`;
+    drawCoverage();
     const idle = S.tab === 'standzeit';
     $('#timeBar').hidden = idle;
     $('#aLead').textContent = TABS[S.tab].lead;
@@ -1046,6 +1050,7 @@
       + slider('p-maxDurH', 'Länger weg = Werkstatt oder Umverteilung', 0.5, 12, 0.5, f.maxDurH, FMT.maxDurH);
   }
 
+  const WIN_PRESETS = [['Ganzer Tag', 0, 96], ['Nachts 0–6', 0, 24], ['Morgens 6–10', 24, 40], ['Tagsüber 10–16', 40, 64], ['Abends 16–20', 64, 80], ['Spätabends 20–24', 80, 96]];
   function filterBlock() {
     const { from, to } = filterDates();
     const min = tlIndex?.length ? firstDate() : '', max = tlIndex?.length ? lastDate() : '';
@@ -1062,9 +1067,8 @@
         <div class="wdays">${WD_NAMES.map((n, i) => `<button type="button" data-wd="${i}" aria-pressed="${!!S.f.wd[i]}">${n}</button>`).join('')}</div>
         <div class="quick"><button data-wdp="1111111">Alle</button><button data-wdp="1111100">Mo–Fr</button><button data-wdp="0000011">Sa/So</button></div></div>
       <div class="row"><h3>Uhrzeit</h3>
-        <div class="quick">${[['Ganzer Tag', 0, 96], ['Morgens 6–10', 24, 40], ['Tagsüber 10–16', 40, 64], ['Abends 16–20', 64, 80], ['Nachts 20–6', 80, 24]]
-          .map(([l, a, b]) => `<button data-win="${a},${b}">${l}</button>`).join('')}</div>
-        <p class="hint">Oder mit den beiden Reglern oben. Liegt der Beginn hinter dem Ende, reicht das Fenster über Mitternacht.</p></div>`;
+        <div class="quick">${WIN_PRESETS.map(([l, a, b]) => `<button data-win="${a},${b}" aria-pressed="${S.f.a === a && S.f.b === b}">${l}</button>`).join('')}</div>
+        <p class="hint">Oder oben am Regler: Griffe ziehen ändert Beginn und Ende, den dunklen Balken ziehen verschiebt das ganze Fenster. Die grauen Säulen darüber zeigen, zu welchen Uhrzeiten es Abfragen gibt.</p></div>`;
     return `<details class="explain"><summary>So wird gerechnet</summary>${TABS[S.tab].how}</details>
       <div class="block filters" id="filters"><h2>Filter</h2>${common}${tabParams()}</div>`;
   }
@@ -1092,8 +1096,52 @@
   function scheduleCompute(delay = 120) {
     clearTimeout(anTimer);
     anTimer = setTimeout(compute, delay);
-    const top = $('#aLegend .top');
-    if (top && !$('.busy', top)) top.insertAdjacentHTML('beforeend', '<span class="busy">rechnet</span>');
+    setBusy();
+  }
+
+  // ---- one status line in the peek, the same for every tab
+  const plural = (n, one, many) => `${nf.format(n)} ${n === 1 ? one : many}`;
+  function setBusy() {
+    const el = $('#aStatus');
+    if (!el || S.tab === 'standzeit') return;
+    if (!$('.busy', el)) { el.className = 'astatus'; el.innerHTML = '<span class="busy">rechnet …</span>'; }
+  }
+  function widenButtons() {
+    const b = [];
+    if (!wholeDay()) b.push(['day', 'Ganzer Tag']);
+    if (S.f.wd.some((x) => !x)) b.push(['wd', 'Alle Wochentage']);
+    if (S.f.range !== 'all') b.push(['range', 'Ganzer Zeitraum']);
+    return b.map(([w, l]) => `<button class="btn sm" type="button" data-act="widen" data-w="${w}">${l}</button>`).join('');
+  }
+  function setStatus(msg, kind = '') {
+    const el = $('#aStatus');
+    el.className = `astatus${kind ? ` ${kind}` : ''}`;
+    el.innerHTML = `<span class="msg">${msg}</span>${kind === 'none' ? `<span class="acts">${widenButtons()}</span>` : ''}`;
+    refreshSheet();
+  }
+  const basisText = (polls, days) => `${plural(polls, 'Abfrage', 'Abfragen')} an ${plural(days, 'Tag', 'Tagen')}`;
+  // normal result: what the numbers are based on; warns when that is thin
+  function statusOk(polls, days, lead = '') {
+    const thin = polls < 30;
+    setStatus(`${lead ? `<b>${lead}</b> · ` : ''}Grundlage: ${basisText(polls, days)}.${thin ? ' Noch wenig Daten, Werte eher zufällig.' : ''}`, thin ? 'warn' : '');
+  }
+  function statusNone(what) {
+    setStatus(`<b>${what}</b> ${wholeDay() ? '' : 'Die grauen Säulen über dem Regler zeigen, wann es Daten gibt.'}`, 'none');
+  }
+
+  // ---- data coverage above the time slider (polls per 15 min, date range + weekdays)
+  function drawCoverage() {
+    const svg = $('#wCov'); if (!svg) return;
+    const c = S.cov;
+    if (!c) { svg.innerHTML = ''; return; }
+    const max = Math.max(1, ...c.bins);
+    let h = '';
+    for (let i = 0; i < 96; i++) {
+      if (!c.bins[i]) continue;
+      const v = 2.5 + 7.5 * Math.sqrt(c.bins[i] / max);
+      h += `<rect x="${i + 0.12}" y="${10 - v}" width="0.76" height="${v}"${i >= S.f.a && i < S.f.b ? ' class="in"' : ''}/>`;
+    }
+    svg.innerHTML = h;
   }
 
   function coverageText() {
@@ -1101,9 +1149,15 @@
     const days = tlIndex.slice(-5).map((d) => `${fDate.format(new Date(d.t0 * 1000))} ${fTime.format(new Date(d.t0 * 1000))}–${fTime.format(new Date(d.t1 * 1000))} Uhr`);
     return `${tlIndex.length > 5 ? '… ' : ''}${days.join(', ')}`;
   }
+  // body text under an empty result (the actions sit in the status line in the peek)
   function emptyState(what) {
-    return `<div class="empty"><b>${what}</b><p>Daten gibt es bisher für: ${esc(coverageText())}.</p>
-      <div class="actions"><button class="btn sm" data-act="widen" type="button">Alle Tage, ganzer Tag, alles</button></div></div>`;
+    return `<div class="empty"><b>${what}</b><p>Daten gibt es bisher für: ${esc(coverageText())}.</p></div>`;
+  }
+  // clear everything a tab draws on the map, so an empty result never leaves old shapes behind
+  function clearAnalysisLayers() {
+    clearRaster(); legendClear(); stopParticles();
+    flowLines = [];
+    for (const id of ['flows', 'netc', 'anst']) setData(id, EMPTY);
   }
 
   async function compute() {
@@ -1112,58 +1166,80 @@
     const { dates } = filterDates();
     const f = F();
     const out = () => $('#aOut');
+    setBusy();
+    const none = (status, body) => { clearAnalysisLayers(); statusNone(status); out().innerHTML = emptyState(body || status); };
     try {
-      if (S.tab === 'standzeit') { renderIdle(); return; }
-      if (!dates.length) { legendClear(); clearRaster(); out().innerHTML = emptyState('Im gewählten Zeitraum gibt es keine Daten.'); return; }
-      if (!f.wd.some(Boolean)) { legendClear(); out().innerHTML = '<div class="empty">Bitte mindestens einen Wochentag wählen.</div>'; return; }
+      if (S.tab === 'standzeit') { $('#aStatus').innerHTML = ''; renderIdle(); return; }
+      if (!dates.length) { S.cov = null; drawCoverage(); none('Im gewählten Zeitraum gibt es keine Daten.'); return; }
+      if (!f.wd.some(Boolean)) { S.cov = null; drawCoverage(); clearAnalysisLayers(); setStatus('<b>Kein Wochentag gewählt.</b>', 'none'); out().innerHTML = ''; return; }
+      // same check for every tab: are there polls in this filter at all?
+      const cov = await rpc('coverage', { F: f, dates });
+      if (seq !== anSeq) return;
+      S.cov = cov; drawCoverage();
+      if (!cov.polls) {
+        none(`Zwischen ${winLabel()} Uhr gibt es ${f.wd.every(Boolean) ? '' : `(${wdLabel()}) `}noch keine Abfragen.`, 'Keine Abfrage in diesem Zeitfenster.');
+        return;
+      }
       let r;
       switch (S.tab) {
         case 'erreichbarkeit':
           r = await rpc('reach', { F: f, dates, res: S.f.res, metric: S.f.reachMetric, R: S.f.R, classes: S.f.reachMetric === 'prob' ? probClasses() : distClasses() });
           if (seq !== anSeq) return;
-          if (!r.polls) { clearRaster(); legendClear(); out().innerHTML = emptyState('Keine Abfrage passt zum Filter.'); break; }
-          showRaster(r); renderReachOut(r); break;
+          showRaster(r); renderReachOut(r);
+          if (r.sampled > r.polls) setStatus(`Grundlage: gleichmäßige Stichprobe von ${nf.format(r.polls)} aus ${basisText(r.sampled, r.days)}.`);
+          else statusOk(r.polls, r.days);
+          break;
         case 'dichte':
           r = await rpc('density', { F: f, dates, res: S.f.res, smooth: S.f.smooth, stops: toStops(R.heat.slice(1), 0.25, 0.9) });
           if (seq !== anSeq) return;
-          if (!r.polls) { clearRaster(); legendClear(); out().innerHTML = emptyState('Keine Abfrage passt zum Filter.'); break; }
-          showRaster(r); renderDensOut(r); break;
+          showRaster(r); renderDensOut(r); statusOk(r.polls, r.days); break;
         case 'nutzung':
           r = await rpc('usage', { F: f, dates, P: tripParams() });
           if (seq !== anSeq) return;
-          renderUsageOut(r); break;
+          renderUsageOut(r);
+          if (!r.count) statusNone(`Keine Fahrten mit Start ${wholeDay() ? 'im Zeitraum' : `zwischen ${winLabel()} Uhr`} (${basisText(r.polls, r.days)}).`);
+          else statusOk(r.polls, r.days, `${plural(r.count, 'Fahrt', 'Fahrten')} im Zeitfenster`);
+          break;
         case 'stroeme':
           r = await rpc('flows', { F: f, dates, P: tripParams(), cell: S.f.cell, top: S.f.top, min: S.f.min });
           if (seq !== anSeq) return;
-          renderFlowsOut(r); break;
+          renderFlowsOut(r);
+          if (!r.trips) statusNone(`Keine Fahrten mit Start ${wholeDay() ? 'im Zeitraum' : `zwischen ${winLabel()} Uhr`} (${basisText(r.polls, r.days)}).`);
+          else statusOk(r.polls, r.days, `${plural(r.trips, 'Fahrt', 'Fahrten')} im Zeitfenster`);
+          break;
         case 'stationen':
           r = await rpc('stations', { F: f, dates, k: S.f.k });
           if (seq !== anSeq) return;
-          renderStationsOut(r); break;
+          renderStationsOut(r); statusOk(r.polls, r.days); break;
         default:
       }
       if (S.sel?.type === 'point') pointQuery(S.sel.lng, S.sel.lat, true);
       if (S.sel?.type === 'station') stationQuery(S.sel.uid, true);
     } catch (err) {
       console.error(err);
-      if (seq === anSeq) out().innerHTML = `<div class="empty">Die Auswertung ist fehlgeschlagen: ${esc(err.message.split('\n')[0])}</div>`;
+      if (seq === anSeq) { setStatus('<b>Die Auswertung ist fehlgeschlagen.</b>', 'none'); out().innerHTML = `<div class="empty">${esc(err.message.split('\n')[0])}</div>`; }
     }
   }
 
+  // the raster goes to the map as a PNG blob URL (encoded off the main thread by toBlob)
+  let rasterUrl = null, rasterSeq = 0;
   function showRaster(r) {
-    const cv = document.createElement('canvas');
-    cv.width = r.w; cv.height = r.h;
-    cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.rgba.buffer || r.rgba), r.w, r.h), 0, 0);
+    const src = map.getSource('raster'); if (!src) return;
+    const seq = ++rasterSeq;
+    rasterCv.width = r.w; rasterCv.height = r.h;
+    rasterCv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.rgba.buffer || r.rgba), r.w, r.h), 0, 0);
     const b = r.bbox;
-    map.getSource('raster').updateImage({ url: cv.toDataURL(), coordinates: [[b.w, b.n], [b.e, b.n], [b.e, b.s], [b.w, b.s]] });
+    rasterCv.toBlob((blob) => {
+      if (seq !== rasterSeq || !blob) return;
+      const url = URL.createObjectURL(blob);
+      src.updateImage({ url, coordinates: [[b.w, b.n], [b.e, b.n], [b.e, b.s], [b.w, b.s]] });
+      if (rasterUrl) setTimeout(URL.revokeObjectURL, 2000, rasterUrl);
+      rasterUrl = url;
+    });
   }
-  function clearRaster() { map.getSource('raster')?.updateImage({ url: PIXEL }); }
+  function clearRaster() { rasterSeq++; map.getSource('raster')?.updateImage({ url: PIXEL }); }
   const legendClear = () => { $('#aLegend').innerHTML = ''; refreshSheet(); };
 
-  function basisLine(polls, days, extra = '') {
-    const warn = polls < 30;
-    return `<p class="basis${warn ? ' warn' : ''}">Grundlage: ${nf.format(polls)} Abfragen an ${nf.format(days)} ${days === 1 ? 'Tag' : 'Tagen'}.${warn ? ' Das ist noch wenig, die Werte sind eher zufällig.' : ''} ${extra}</p>`;
-  }
   const legend = (cap, body) => { $('#aLegend').innerHTML = `<div class="top"><div class="cap">${cap}</div></div>${body}`; refreshSheet(); };
 
   function renderReachOut(r) {
@@ -1173,14 +1249,13 @@
       legend('Typischer Weg zum nächsten Rad (Luftlinie), bis …',
         stepLegend(STEPS, DIST_CLASSES.map((c) => c[1]), DIST_CLASSES.map((c) => `~${c[2]} Min.`)) + '<p class="hint legend-note">Ohne Farbe: weiter als 1,2 km. Gehzeit bei Luftlinie, der echte Weg ist etwas länger.</p>');
     }
-    $('#aOut').innerHTML = `${basisLine(r.polls, r.days, r.sampled > r.polls ? `Gleichmäßige Stichprobe aus ${nf.format(r.sampled)} passenden Abfragen.` : '')}
-      <p class="hint">Tipp: irgendwo auf die Karte tippen. Dann wird für genau diesen Ort gerechnet, mit Tagesverlauf.</p>
+    $('#aOut').innerHTML = `<p class="hint">Tipp: irgendwo auf die Karte tippen. Dann wird für genau diesen Ort gerechnet, mit Tagesverlauf.</p>
       ${S.me ? '<div class="actions"><button class="btn sm ghost" data-act="pointme" type="button">Meinen Standort auswerten</button></div>' : ''}`;
   }
 
   function renderDensOut(r) {
     legend('Abgestellte Räder pro Hektar, im Schnitt', `<div class="bar" style="background:${gradient(R.heat.slice(1))}"></div><div class="scale"><span>wenige</span><span>${nf1.format(r.vmax)} pro ha</span></div>`);
-    $('#aOut').innerHTML = `${basisLine(r.polls, r.days)}<p class="hint">Tipp: auf die Karte tippen für den Tagesverlauf an diesem Ort.</p>`;
+    $('#aOut').innerHTML = `<p class="hint">Tipp: auf die Karte tippen für den Tagesverlauf an diesem Ort.</p>`;
   }
 
   function renderUsageOut(r) {
@@ -1189,10 +1264,8 @@
       <div class="stat"><b>${r.perDay != null ? nf.format(Math.round(r.perDay)) : '–'}</b><span>pro Tag</span></div>
       <div class="stat"><b>${r.medDur != null ? `${nf.format(Math.round(r.medDur))} min` : '–'}</b><span>Dauer, Median</span></div>
       <div class="stat"><b>${r.medDist != null ? fmtDist(r.medDist) : '–'}</b><span>Strecke, Median</span></div></div>`);
-    if (!r.series.t.length) { $('#aOut').innerHTML = emptyState('Keine Abfrage passt zum Filter.'); return; }
     const dur = r.durH, dist = r.distH;
-    $('#aOut').innerHTML = `${basisLine(r.series.t.length, r.days)}
-      ${!r.count ? emptyState('Im gewählten Zeitfenster wurden keine Fahrten erkannt.') : ''}
+    $('#aOut').innerHTML = `${!r.count ? '<p class="hint">Im Zeitfenster wurde keine Fahrt erkannt. Die Tagesverläufe unten gelten trotzdem für alle Uhrzeiten.</p>' : ''}
       <div class="block">${lineChart({ title: 'Räder unterwegs nach Uhrzeit', sub: 'Durchschnitt', series: [{ name: wdLabel(), color: C.trip, values: r.inuseH }], band: [t0, t1] })}</div>
       <div class="block">${lineChart({ title: 'Fahrtbeginne pro Stunde', sub: 'Durchschnitt', series: [{ name: wdLabel(), color: C.trip, values: r.perHour }], band: [t0, t1] })}</div>
       <div class="block">${timeChart({ title: 'Räder unterwegs im Zeitraum', t: r.series.t, values: r.series.inuse, color: C.trip })}</div>
@@ -1200,7 +1273,7 @@
         labels: dur.map((_, k) => (k === dur.length - 1 ? 'über 2 Std.' : `${k * 5}–${k * 5 + 5} min`)), tickEvery: 6, tickLabel: (k) => (k === dur.length - 1 ? '' : `${k * 5}`), unitX: 'min' })}</div>
       <div class="block">${barChart({ title: 'Strecke (Luftlinie)', sub: `${nf.format(r.count)} Fahrten`, values: dist,
         labels: dist.map((_, k) => (k === dist.length - 1 ? 'über 8 km' : `${nf1.format(k * 0.25)}–${nf1.format(k * 0.25 + 0.25)} km`)), tickEvery: 4, tickLabel: (k) => (k === dist.length - 1 ? '' : nf1.format(k * 0.25)), unitX: 'km' })}</div>
-      <p class="hint">Nicht als Fahrt gezählt: ${nf.format(r.service)} Abwesenheiten über ${nf1.format(S.f.maxDurH)} Std. und ${nf.format(r.round)} Rückkehren an denselben Ort.</p>`;
+      <p class="hint">Nicht als Fahrt gezählt: ${nf.format(r.service)} Abwesenheiten über ${nf1.format(S.f.maxDurH)} Std., ${nf.format(r.round)} Rückkehren an denselben Ort${r.unclear ? ` und ${nf.format(r.unclear)} Bewegungen über eine Abfragelücke von mehr als einer Stunde (Zeitpunkt unklar)` : ''}.</p>`;
   }
 
   function nearestStationName(lng, lat) {
@@ -1217,18 +1290,17 @@
     setData('flows', { type: 'FeatureCollection', features: flowLines.map((l) => ({
       type: 'Feature', geometry: { type: 'LineString', coordinates: arcPath(l.a, l.b, 1, 20) }, properties: { w: l.w, c: l.c } })) });
     const vmax = Math.max(1, ...r.cells.map((c) => c[2] + c[3]));
-    setData('netc', { type: 'FeatureCollection', features: r.cells.filter((c) => c[2] + c[3] >= 2).map(([x, y, s, e]) => ({
+    // circles use the same threshold as the lines, so both always appear together
+    setData('netc', { type: 'FeatureCollection', features: r.cells.filter((c) => c[2] + c[3] >= S.f.min).map(([x, y, s, e]) => ({
       type: 'Feature', geometry: { type: 'Point', coordinates: [x, y] }, properties: { v: (e - s) / (e + s), n: e + s, s, e, rel: Math.sqrt((e + s) / vmax) } })) });
     legend('Kreise: Bilanz je Bereich. Linien: häufigste Verbindungen, die Punkte zeigen die Richtung.',
       `<div class="bar" style="background:${gradient([R.div.neg[0], R.div.neg[1], R.div.neg[2], R.div.mid, R.div.pos[0], R.div.pos[1], R.div.pos[2]])}"></div>
       <div class="scale"><span>mehr Abfahrten</span><span>ausgeglichen</span><span>mehr Ankünfte</span></div>`);
-    if (!r.trips) { $('#aOut').innerHTML = emptyState('Keine Fahrten im Filter.'); stopParticles(); return; }
+    if (!r.trips) { legendClear(); $('#aOut').innerHTML = emptyState('Keine Fahrten im Zeitfenster.'); stopParticles(); return; }
     const top = r.lines.slice(0, 12);
-    $('#aOut').innerHTML = `${basisLine(r.trips, filterDates().dates.length, '')}
-      <h2>Häufigste Verbindungen</h2>
+    $('#aOut').innerHTML = `<h2>Häufigste Verbindungen</h2>
       ${top.length ? `<ul class="rows">${top.map(([x0, y0, x1, y1, c]) => `<li><span class="main"><b>${esc(nearestStationName(x0, y0))}</b><small>nach ${esc(nearestStationName(x1, y1))}, ${fmtDist(hav(y0, x0, y1, x1))}</small></span><span class="val">${nf.format(c)}<small>${c === 1 ? 'Fahrt' : 'Fahrten'}</small></span></li>`).join('')}</ul>`
-        : '<p class="hint">Keine Verbindung erreicht die Mindestzahl.</p>'}`;
-    $('#aOut .basis').textContent = `Grundlage: ${nf.format(r.trips)} geschätzte Fahrten an ${nf.format(filterDates().dates.length)} ${filterDates().dates.length === 1 ? 'Tag' : 'Tagen'}.`;
+        : `<p class="hint">Keine Verbindung hat mindestens ${S.f.min} Fahrten. Unter „Filter“ die Mindestzahl senken.</p>`}`;
     startParticles();
   }
   function startParticles() {
@@ -1275,13 +1347,12 @@
       : ['interpolate', ['linear'], ['get', 'r'], 0, R.blue[0], 0.33, R.blue[1], 0.66, R.blue[2], 1, R.blue[3]]);
     if (empty) legend(`Chance, dass die Station ${S.f.k ? `höchstens ${S.f.k} ${S.f.k === 1 ? 'Rad' : 'Räder'} hat` : 'leer ist'}`, `<div class="bar" style="background:${gradient(R.red)}"></div><div class="scale"><span>nie</span><span>50 %</span><span>immer</span></div>`);
     else legend('Durchschnittliche Zahl Räder an der Station', `<div class="bar" style="background:${gradient(R.blue)}"></div><div class="scale"><span>0</span><span>${nf1.format(amax / 2)}</span><span>${nf1.format(amax)}</span></div>`);
-    if (!rows.length) { $('#aOut').innerHTML = emptyState('Keine Abfrage passt zum Filter.'); return; }
+    if (!rows.length) { legendClear(); $('#aOut').innerHTML = emptyState('Keine Abfrage passt zum Filter.'); return; }
     const emp = rows.slice().sort((x, y) => y.p - x.p || x.avg - y.avg).slice(0, 8);
     const full = rows.slice().sort((x, y) => y.avg - x.avg).slice(0, 6);
     const kl = S.f.k ? 'fast leer' : 'leer';
     const li = (s, v, sub) => `<li><button class="rowbtn" data-act="stq" data-id="${esc(s.uid)}"><span class="main"><b>${esc(s.name)}</b><small>${sub}</small></span><span class="val">${v}</span></button></li>`;
-    $('#aOut').innerHTML = `${basisLine(r.polls, filterDates().dates.length)}
-      <h2>Am häufigsten ${kl}</h2><ul class="rows">${emp.map((s) => li(s, `${Math.round(s.p)} %<small>der Zeit ${kl}</small>`, `im Schnitt ${nf1.format(s.avg)} Räder`)).join('')}</ul>
+    $('#aOut').innerHTML = `<h2>Am häufigsten ${kl}</h2><ul class="rows">${emp.map((s) => li(s, `${Math.round(s.p)} %<small>der Zeit ${kl}</small>`, `im Schnitt ${nf1.format(s.avg)} Räder`)).join('')}</ul>
       <h2 class="spaced">Meist gut gefüllt</h2><ul class="rows">${full.map((s) => li(s, `${nf1.format(s.avg)}<small>Räder im Schnitt</small>`, `${Math.round(s.p)} % der Zeit ${kl}`)).join('')}</ul>`;
   }
 
@@ -1398,16 +1469,71 @@
       <rect class="hit" x="${L}" y="${T}" width="${w}" height="${h}"/></svg></div>`;
   }
 
+  // ---- time window: one slider, two handles, never crossing, at least 15 min
+  function setWindow(a, b, delay = 180) {
+    a = Math.max(0, Math.min(95, Math.round(a))); b = Math.max(a + 1, Math.min(96, Math.round(b)));
+    if (a === S.f.a && b === S.f.b) return;
+    S.f.a = a; S.f.b = b;
+    stopWindowPlay(); syncFilterUI(); saveFilter(); scheduleCompute(delay);
+    $$('#filters [data-win]').forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.win === `${a},${b}`)));
+  }
+  function setupDual() {
+    const el = $('#wDual'), A = $('#wA'), B = $('#wB');
+    const geo = () => { const r = el.getBoundingClientRect(); return { x0: r.left + 12, w: Math.max(1, r.width - 24) }; };
+    const pos = (x) => { const g = geo(); return ((x - g.x0) / g.w) * 96; };
+    let drag = null;
+    el.addEventListener('pointerdown', (e) => {
+      if (e.button > 0) return;
+      const u = pos(e.clientX), { a, b } = S.f, px = geo().w / 96;
+      const da = Math.abs(u - a) * px, db = Math.abs(u - b) * px;
+      // narrow window (thinner than a finger): pressing on it moves it, pressing
+      // beside it pulls the nearer edge there. Wide window: the ends are handles,
+      // the middle moves the whole window.
+      let mode;
+      const wpx = (b - a) * px;
+      if (wpx < 34 && !wholeDay()) mode = u >= a - 8 / px && u <= b + 8 / px ? 'move' : u < a ? 'a' : 'b';
+      else if (da <= 16 && da <= db) mode = 'a';
+      else if (db <= 16) mode = 'b';
+      else if (u > a && u < b && !wholeDay()) mode = 'move';
+      else if (u > a && u < b) mode = u - a < b - u ? 'a' : 'b';
+      else mode = u < a ? 'a' : 'b';
+      drag = { mode, u0: u, a0: a, b0: b, id: e.pointerId };
+      try { el.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+      el.classList.add('dragging');
+      (mode === 'b' ? B : A).focus({ preventScroll: true });
+      if (mode !== 'move') moveTo(e.clientX);
+      e.preventDefault();
+    });
+    const moveTo = (x) => {
+      const u = pos(x);
+      if (drag.mode === 'a') setWindow(Math.min(Math.round(u), S.f.b - 1), S.f.b);
+      else if (drag.mode === 'b') setWindow(S.f.a, Math.max(Math.round(u), S.f.a + 1));
+      else {
+        const w = drag.b0 - drag.a0, a = Math.max(0, Math.min(96 - w, drag.a0 + Math.round(u - drag.u0)));
+        setWindow(a, a + w);
+      }
+    };
+    el.addEventListener('pointermove', (e) => { if (drag && e.pointerId === drag.id) moveTo(e.clientX); });
+    const end = (e) => { if (drag && e.pointerId === drag.id) { drag = null; el.classList.remove('dragging'); } };
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
+    // keyboard (arrow keys on the focused handle): same rules
+    A.addEventListener('input', () => { setWindow(Math.min(+A.value, S.f.b - 1), S.f.b); A.value = S.f.a; });
+    B.addEventListener('input', () => { setWindow(S.f.a, Math.max(+B.value, S.f.a + 1)); B.value = S.f.b; });
+  }
+
   // ---- filter inputs
   let wTimer = 0;
   function stopWindowPlay() { S.wPlaying = false; clearInterval(wTimer); $('#wPlay').classList.remove('on'); }
   function startWindowPlay() {
     S.wPlaying = true; $('#wPlay').classList.add('on');
     clearInterval(wTimer);
-    if (S.f.a === 0 && S.f.b === 96) { S.f.a = 0; S.f.b = 4; }
+    if (wholeDay()) { S.f.a = 0; S.f.b = 4; syncFilterUI(); scheduleCompute(0); }
     wTimer = setInterval(() => {
-      const width = (((S.f.b - S.f.a) % 96) + 96) % 96 || 4;
-      S.f.a = (S.f.a + 4) % 96; S.f.b = (S.f.a + width) % 96 || 96;
+      const w = S.f.b - S.f.a;
+      // one hour forward; at the end of the day start again at 00:00
+      if (S.f.b >= 96) S.f.a = 0; else S.f.a = Math.min(S.f.a + 4, 96 - w);
+      S.f.b = S.f.a + w;
       syncFilterUI(); saveFilter(); scheduleCompute(0);
     }, 1600);
   }
@@ -1456,8 +1582,8 @@
       syncFilterUI(); saveFilter(); scheduleCompute(0);
     }));
     root.querySelectorAll('[data-win]').forEach((b) => b.addEventListener('click', () => {
-      const [a, c] = b.dataset.win.split(',').map(Number); S.f.a = a; S.f.b = c;
-      stopWindowPlay(); syncFilterUI(); saveFilter(); scheduleCompute(0);
+      const [a, c] = b.dataset.win.split(',').map(Number);
+      setWindow(a, c, 0);
     }));
   }
 
@@ -1705,9 +1831,7 @@
     });
 
     // analysis time window
-    const onWin = (e) => { S.f[e.target.id === 'wA' ? 'a' : 'b'] = +e.target.value; stopWindowPlay(); syncFilterUI(); saveFilter(); scheduleCompute(180); };
-    $('#wA').addEventListener('input', onWin);
-    $('#wB').addEventListener('input', onWin);
+    setupDual();
     $('#wPlay').addEventListener('click', () => (S.wPlaying ? stopWindowPlay() : startWindowPlay()));
 
     // delegated actions
@@ -1735,7 +1859,13 @@
         setTimeout(() => { pointQuery(S.me[0], S.me[1]); flyTo(S.me, 14.5); }, 60);
       }
       else if (a === 'clearpoint') { S.sel = null; setData('qpt', EMPTY); applyVisibility(); closeDetail(); }
-      else if (a === 'widen') { S.f.wd = [1, 1, 1, 1, 1, 1, 1]; S.f.a = 0; S.f.b = 96; S.f.range = 'all'; saveFilter(); enterAnalysis(); }
+      else if (a === 'widen') {
+        const w = el.dataset.w;
+        if (w === 'day') { S.f.a = 0; S.f.b = 96; stopWindowPlay(); }
+        else if (w === 'wd') S.f.wd = [1, 1, 1, 1, 1, 1, 1];
+        else if (w === 'range') S.f.range = 'all';
+        saveFilter(); enterAnalysis();
+      }
     });
     $('#near').addEventListener('click', (e) => { if (e.target.id === 'btnNear2') locate(false); });
 
@@ -1771,7 +1901,7 @@
     if (typeof maplibregl === 'undefined') { toast('Die Kartenbibliothek konnte nicht geladen werden. Bitte Seite neu laden.', 10000); return; }
     initMap(S.cfg);
   }
-  window.__app = S;
+  window.__app = S; Object.defineProperty(window, '__map', { get: () => map });
   window.__ui = { setMode, setSheet, showStation, showBike, pointQuery, stationQuery, flyTo, setFrame, startPlay, stopPlay, goLive };
   start();
 })();

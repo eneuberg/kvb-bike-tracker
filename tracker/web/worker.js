@@ -2,7 +2,7 @@
    computes every analysis with freely chosen parameters, off the main thread.
 
    Filter F = { from, to: 'YYYY-MM-DD', wd: [7 booleans, Mo..So],
-                t0, t1: minutes of day (t0 > t1 = window wraps midnight),
+                t0, t1: minutes of day, t0 < t1 (t0 === t1 = whole day),
                 kind: 'all' | 'free' | 'station' } */
 'use strict';
 
@@ -85,6 +85,26 @@ function replay(dates, cb) {
       cb(day.t[i], S, day);
     }
   }
+}
+
+// polls in the filter (date range, weekdays, time window) and how many days they span
+function pollStats(F, dates) {
+  let polls = 0;
+  const days = new Set();
+  for (const d of dates) { const day = DAYS.get(d); if (day) for (const t of day.t) if (matches(F, t)) { polls++; days.add(d); } }
+  return { polls, days: days.size };
+}
+
+// polls per 15-minute slot of the day (date range + weekdays, ignoring the
+// time window), so the UI can show where data exists before you pick a window
+function coverage({ F, dates }) {
+  const bins = new Uint16Array(96);
+  const dayBins = Array.from({ length: 96 }, () => new Set());
+  for (const d of dates) {
+    const day = DAYS.get(d); if (!day) continue;
+    for (const t of day.t) { const p = info(t); if (!F.wd[p.wd]) continue; const b = Math.floor(p.min / 15); bins[b]++; dayBins[b].add(d); }
+  }
+  return { bins: Array.from(bins), binDays: dayBins.map((s) => s.size), ...pollStats(F, dates) };
 }
 
 const kindOk = (kind, pl) => kind === 'all' || (kind === 'free' ? pl < 0 : pl >= 0);
@@ -201,7 +221,7 @@ function avail({ F, dates, R, res: want, stops }) {
   const shown = blur(g, pct, Math.max(0.6, 60 / res));
   for (let i = 0; i < NC; i++) if (shown[i] < 0.5) shown[i] = 0;
   const rgba = colorize(g, shown, 100, stops, true);
-  return { w: g.W, h: g.H, bbox: BBOX, rgba, polls, days: seenDays.size, res, auto: res !== want, vals: pct };
+  return { w: g.W, h: g.H, bbox: gbox(g), rgba, polls, days: seenDays.size, res, auto: res !== want, vals: pct };
 }
 
 // average bikes per cell, smoothed (kernel density)
@@ -230,7 +250,7 @@ function density({ F, dates, res, smooth, stops }) {
   const vmax = sorted.length ? sorted[Math.floor(sorted.length * 0.995)] : 1;
   const rgba = colorize(g, vals, vmax || 1, stops, true);
   for (let i = 0; i < NC; i++) if (vals[i] < vmax * 0.02) rgba[(((g.H - 1 - Math.floor(i / g.W)) * g.W) + (i % g.W)) * 4 + 3] = 0;
-  return { w: g.W, h: g.H, bbox: g.bb, rgba, polls, days: seenDays.size, res, vmax, vals };
+  return { w: g.W, h: g.H, bbox: gbox(g), rgba, polls, days: seenDays.size, res, vmax, vals };
 }
 
 // exact profile for one location: chance / average count within R per 15 min
@@ -277,7 +297,7 @@ function stations({ F, dates, k }) {
     for (let b = 0; b < S.n; b++) if (S.p[b] && S.pl[b] >= 0) cnt[S.pl[b]]++;
     for (const j of day.stations) { n[j]++; sum[j] += cnt[j]; if (cnt[j] <= k) e[j]++; }
   });
-  return { polls, list: G.st.map((s, j) => ({ j, uid: s.uid, name: s.name, lat: s.lat, lng: s.lng,
+  return { polls, days: pollStats(F, dates).days, list: G.st.map((s, j) => ({ j, uid: s.uid, name: s.name, lat: s.lat, lng: s.lng,
     p: n[j] ? (e[j] * 100) / n[j] : null, avg: n[j] ? sum[j] / n[j] : null, n: n[j] })) };
 }
 
@@ -307,7 +327,10 @@ function inferTrips(dates, P) {
   const oT0 = new Float64Array(N), oT1 = new Float64Array(N), oLat = new Float64Array(N), oLng = new Float64Array(N), open = new Uint8Array(N);
   const trips = [];
   const pollT = [], pollTotal = [];
-  let prevT = null, service = 0, round = 0;
+  let prevT = null, service = 0, round = 0, unclear = 0;
+  // when two polls are far apart (missed runs) we cannot say when a trip
+  // happened; such trips are left out instead of being piled into the gap
+  const MAX_GAP = 3600;
   const dist = (a, b, c, d) => Math.hypot((c - a) * M_LAT, (d - b) * M_LNG);
   replay(dates, (t, S) => {
     let total = 0;
@@ -318,13 +341,14 @@ function inferTrips(dates, P) {
         const was = prevP[b];
         if (was && now) {
           const d = dist(prevLat[b], prevLng[b], S.lat[b], S.lng[b]);
-          if (d > P.jump) trips.push(prevT, t, prevLat[b], prevLng[b], S.lat[b], S.lng[b], d, 1);
+          if (d > P.jump) { if (t - prevT > MAX_GAP) unclear++; else trips.push(prevT, t, prevLat[b], prevLng[b], S.lat[b], S.lng[b], d, 1); }
         } else if (was && !now) {
           open[b] = 1; oT0[b] = prevT; oT1[b] = t; oLat[b] = prevLat[b]; oLng[b] = prevLng[b];
         } else if (!was && now && open[b]) {
           open[b] = 0;
           const st = (oT0[b] + oT1[b]) / 2, en = (prevT + t) / 2, d = dist(oLat[b], oLng[b], S.lat[b], S.lng[b]);
           if (en - st > P.maxDur) service++;
+          else if (oT1[b] - oT0[b] > MAX_GAP || t - prevT > MAX_GAP) unclear++;
           else if (d < P.minGone) round++;
           else trips.push(st, en, oLat[b], oLng[b], S.lat[b], S.lng[b], d, 0);
         }
@@ -349,7 +373,7 @@ function inferTrips(dates, P) {
     while (ei < ends.length && ends[ei] <= t) ei++;
     inuse[k] = Math.max(0, si - ei);
   }
-  const res = { trips: Float64Array.from(trips), pollT, pollTotal, inuse, service, round };
+  const res = { trips: Float64Array.from(trips), pollT, pollTotal, inuse, service, round, unclear };
   tripCache = { key, res };
   return res;
 }
@@ -388,7 +412,8 @@ function usage({ F, dates, P }) {
   const ser = { t: [], inuse: [], total: [] };
   for (let k = 0; k < R.pollT.length; k += step) { ser.t.push(R.pollT[k]); ser.inuse.push(R.inuse[k]); ser.total.push(R.pollTotal[k]); }
   return {
-    count, short, service: R.service, round: R.round,
+    ...pollStats(F, dates),
+    count, short, service: R.service, round: R.round, unclear: R.unclear,
     perDay: daysSel.size ? count / daysSel.size : null, days: daysSel.size,
     medDur: med(durs), medDist: med(dists),
     durH: Array.from(durH), distH: Array.from(distH),
@@ -424,7 +449,7 @@ function flows({ F, dates, P, cell, top, min }) {
   const lines = [...od.entries()].filter(([, c]) => c >= min).sort((a, b) => b[1] - a[1]).slice(0, top)
     .map(([k, c]) => { const a = Math.floor(k / 1e6), b = k % 1e6; return [...center(a), ...center(b), c]; });
   const cells = [...net.entries()].map(([c, v]) => [...center(c), v[0], v[1]]);
-  return { trips: used, lines, cells, cell };
+  return { trips: used, lines, cells, cell, ...pollStats(F, dates) };
 }
 
 function inuseSeries({ dates, P }) {
@@ -443,13 +468,57 @@ let reachCache = { key: '', g: null, hist: null, polls: 0, days: 0, sampled: 0 }
 
 const BIN_LUT = (() => { const a = new Uint8Array(260); for (let i = 0; i < 260; i++) { let k = 0; while (k < EDGES.length && i * 10 + 5 > EDGES[k]) k++; a[i] = k; } return a; })();
 
+// squared distance transform in cell units, in place (rows, then columns)
+const INF = 1e10;
+let edtBuf = null;
+function edt1d(f, n, d, v, z) {
+  let k = 0; v[0] = 0; z[0] = -Infinity; z[1] = Infinity;
+  for (let q = 1; q < n; q++) {
+    const fq = f[q] + q * q;
+    let p = v[k], s = (fq - (f[p] + p * p)) / (2 * (q - p));
+    while (s <= z[k]) { k--; p = v[k]; s = (fq - (f[p] + p * p)) / (2 * (q - p)); }
+    k++; v[k] = q; z[k] = s; z[k + 1] = Infinity;
+  }
+  k = 0;
+  for (let q = 0; q < n; q++) { while (z[k + 1] < q) k++; const p = v[k]; d[q] = (q - p) * (q - p) + f[p]; }
+}
+function edt2d(a, W, H) {
+  const n = Math.max(W, H);
+  if (!edtBuf || edtBuf.n < n || edtBuf.W !== W) edtBuf = { n, W, f: new Float64Array(n), d: new Float64Array(n), v: new Int32Array(n), z: new Float64Array(n + 1), dy: new Float64Array(W) };
+  const { f, d, v, z, dy } = edtBuf;
+  // columns: the input is binary (0 = bike, INF = none), so the vertical
+  // distance is just "rows since the last bike" scanned down and then up
+  dy.fill(INF);
+  for (let y = 0; y < H; y++) {
+    const o = y * W;
+    for (let x = 0; x < W; x++) { dy[x] = a[o + x] === 0 ? 0 : dy[x] + 1; a[o + x] = dy[x]; }
+  }
+  dy.fill(INF);
+  for (let y = H - 1; y >= 0; y--) {
+    const o = y * W;
+    for (let x = 0; x < W; x++) {
+      dy[x] = a[o + x] === 0 ? 0 : dy[x] + 1;
+      const m = Math.min(a[o + x], dy[x]);
+      a[o + x] = m >= INF ? INF : m * m;
+    }
+  }
+  // rows: exact lower envelope of parabolas
+  for (let y = 0; y < H; y++) {
+    const o = y * W;
+    for (let x = 0; x < W; x++) f[x] = a[o + x];
+    edt1d(f, W, d, v, z);
+    for (let x = 0; x < W; x++) a[o + x] = d[x];
+  }
+}
+
 function reachCompute({ F, dates, res, maxPolls = 150 }) {
   const key = `${JSON.stringify(F)}|${dates.join(',')}|${res}|${maxPolls}`;
   if (reachCache.key === key) return reachCache;
   const g = grid(res, activeBBox(dates)), NC = g.W * g.H, NB = EDGES.length + 1;
   const hist = new Uint16Array(NC * NB);
   const dist = new Float32Array(NC);
-  const CAP = 2500, D1 = res, D2 = res * Math.SQRT2;
+  const CAP = 2500;
+  const f2 = new Float64Array(NC);
   // which polls: all matching, evenly sampled down to maxPolls
   const match = [];
   for (const d of dates) { const day = DAYS.get(d); if (day) for (const t of day.t) if (matches(F, t)) match.push(t); }
@@ -461,35 +530,16 @@ function reachCompute({ F, dates, res, maxPolls = 150 }) {
   replay(dates, (t, S, day) => {
     if (!take.has(t)) return;
     polls++; seenDays.add(day.date);
-    dist.fill(CAP);
+    // exact Euclidean distance transform (Felzenszwalb & Huttenlocher), so the
+    // rings around a bike are round, not octagonal
+    f2.fill(INF);
     for (let b = 0; b < S.n; b++) {
       if (!S.p[b] || !kindOk(F.kind, S.pl[b])) continue;
       const c = cellOf(g, S.lat[b], S.lng[b]);
-      if (c >= 0) dist[c] = 0;
+      if (c >= 0) f2[c] = 0;
     }
-    const W = g.W, H = g.H;
-    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
-      const i = y * W + x; let v = dist[i];
-      if (x > 0 && dist[i - 1] + D1 < v) v = dist[i - 1] + D1;
-      if (y > 0) {
-        const u = i - W;
-        if (dist[u] + D1 < v) v = dist[u] + D1;
-        if (x > 0 && dist[u - 1] + D2 < v) v = dist[u - 1] + D2;
-        if (x < W - 1 && dist[u + 1] + D2 < v) v = dist[u + 1] + D2;
-      }
-      dist[i] = v;
-    }
-    for (let y = H - 1; y >= 0; y--) for (let x = W - 1; x >= 0; x--) {
-      const i = y * W + x; let v = dist[i];
-      if (x < W - 1 && dist[i + 1] + D1 < v) v = dist[i + 1] + D1;
-      if (y < H - 1) {
-        const u = i + W;
-        if (dist[u] + D1 < v) v = dist[u] + D1;
-        if (x < W - 1 && dist[u + 1] + D2 < v) v = dist[u + 1] + D2;
-        if (x > 0 && dist[u - 1] + D2 < v) v = dist[u - 1] + D2;
-      }
-      dist[i] = v;
-    }
+    edt2d(f2, g.W, g.H);
+    for (let i = 0; i < NC; i++) dist[i] = Math.min(CAP, Math.sqrt(f2[i]) * res);
     const half = res / 2;
     for (let i = 0; i < NC; i++) {
       const d = dist[i] + half; // distance from the cell centre, roughly
@@ -498,6 +548,47 @@ function reachCompute({ F, dates, res, maxPolls = 150 }) {
   });
   reachCache = { key, g, hist, polls, days: seenDays.size, sampled: match.length };
   return reachCache;
+}
+
+// the exact area a grid covers (W*res can be a bit wider than the requested bbox)
+const gbox = (g) => ({ w: g.bb.w, s: g.bb.s, e: g.bb.w + g.W * g.dlng, n: g.bb.s + g.H * g.dlat });
+
+// Stepped colours with round edges: the values are interpolated bilinearly onto
+// a finer pixel grid (up to 4x) before classifying, so class borders follow
+// smooth curves instead of the 50 m raster cells. Edge pixels are blended
+// between the two neighbouring classes (2x2 supersampling) for anti-aliasing.
+// classes = [[upTo, r, g, b, alpha], ...] ascending
+function classifySmooth(g, vals, classes, transparentIf, maxPx = 4.2e6) {
+  const f = Math.max(1, Math.min(4, Math.floor(Math.sqrt(maxPx / (g.W * g.H)))));
+  const W = g.W, H = g.H, OW = W * f, OH = H * f;
+  const out = new Uint8ClampedArray(OW * OH * 4);
+  const at = (x, y) => {
+    if (x < 0) x = 0; else if (x > W - 1) x = W - 1;
+    if (y < 0) y = 0; else if (y > H - 1) y = H - 1;
+    const x0 = x | 0, y0 = y | 0, x1 = Math.min(W - 1, x0 + 1), y1 = Math.min(H - 1, y0 + 1), u = x - x0, v = y - y0;
+    const a = vals[y0 * W + x0], b = vals[y0 * W + x1], c = vals[y1 * W + x0], d = vals[y1 * W + x1];
+    return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+  };
+  const NK = classes.length;
+  const cls = (v) => { if (transparentIf(v)) return -1; let k = 0; while (k < NK - 1 && v > classes[k][0]) k++; return k; };
+  const q = 0.25 / f; // sub-pixel offsets in cell units
+  for (let oy = 0; oy < OH; oy++) {
+    const yc = (OH - 1 - oy + 0.5) / f - 0.5; // image row 0 = north
+    for (let ox = 0; ox < OW; ox++) {
+      const xc = (ox + 0.5) / f - 0.5;
+      const k0 = cls(at(xc - q, yc - q)), k1 = cls(at(xc + q, yc - q)), k2 = cls(at(xc - q, yc + q)), k3 = cls(at(xc + q, yc + q));
+      if (k0 < 0 && k1 < 0 && k2 < 0 && k3 < 0) continue;
+      let r = 0, gg = 0, bb = 0, al = 0;
+      for (const k of [k0, k1, k2, k3]) {
+        if (k < 0) continue;
+        const c = classes[k], w = c[4];
+        r += c[1] * w; gg += c[2] * w; bb += c[3] * w; al += w;
+      }
+      const o = (oy * OW + ox) * 4;
+      out[o] = r / al; out[o + 1] = gg / al; out[o + 2] = bb / al; out[o + 3] = (255 * al) / 4;
+    }
+  }
+  return { rgba: out, w: OW, h: OH };
 }
 
 // stepped colours: classes = [[upTo, r, g, b, alpha], ...] in ascending order
@@ -527,8 +618,8 @@ function reach({ F, dates, res, metric, R, classes }) {
       vals[i] = polls ? (n * 100) / polls : 0;
     }
     const shown = blur(g, vals, 0.8);
-    const rgba = classify(g, shown, classes, (v) => v < 1);
-    return { w: g.W, h: g.H, bbox: g.bb, rgba, vals, polls, days: c.days, sampled: c.sampled, res };
+    const img = classifySmooth(g, shown, classes, (v) => v < 1);
+    return { w: img.w, h: img.h, bbox: gbox(g), rgba: img.rgba, vals, polls, days: c.days, sampled: c.sampled, res };
   }
   // median distance across the sampled polls, interpolated inside its bin
   for (let i = 0; i < NC; i++) {
@@ -540,8 +631,8 @@ function reach({ F, dates, res, metric, R, classes }) {
     vals[i] = lo + ((polls / 2 - acc) / inBin) * (hi - lo);
   }
   const shown = blur(g, vals, 0.8);
-  const rgba = classify(g, shown, classes, (v) => v < 0 || v > classes[classes.length - 1][0]);
-  return { w: g.W, h: g.H, bbox: g.bb, rgba, vals, polls, days: c.days, sampled: c.sampled, res };
+  const img = classifySmooth(g, shown, classes, (v) => v < 0 || v > classes[classes.length - 1][0]);
+  return { w: img.w, h: img.h, bbox: gbox(g), rgba: img.rgba, vals, polls, days: c.days, sampled: c.sampled, res };
 }
 
 // all inferred trips of the given days (for the animated map)
@@ -554,7 +645,7 @@ function tripsList({ dates, P }) {
 const OPS = {
   async init({ base }) { BASE = base; return true; },
   async load({ dates }) { for (const d of dates) await loadDay(d); return { bikes: G.bikeIds.length, stations: G.st.length }; },
-  avail, density, point, stations, stationProfile, usage, flows, inuseSeries, reach, tripsList,
+  avail, density, point, stations, stationProfile, usage, flows, inuseSeries, reach, tripsList, coverage,
 };
 self.onmessage = async (e) => {
   const { id, op, args } = e.data;

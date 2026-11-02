@@ -247,18 +247,31 @@ input.slider::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; 
 .tw-label { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 0 2px; }
 .tw-label b { font: 600 26px/1 var(--font-c); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .tw-label span { font-size: 13.5px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.dual { position: relative; height: 32px; margin-top: 4px; }
-.dual::before { content: ""; position: absolute; left: 12px; right: 12px; top: 13px; height: 6px; border-radius: 3px; background: var(--surface-3); }
-.dual-fill { position: absolute; top: 13px; height: 6px; background: var(--ink); border-radius: 3px; }
-.dual input[type="range"] { position: absolute; inset: 0; height: 32px; pointer-events: none; }
+.dual { position: relative; height: 40px; margin-top: 2px; touch-action: pan-y; cursor: pointer; user-select: none; -webkit-user-select: none; }
+.dual::before { content: ""; position: absolute; left: 12px; right: 12px; top: 24px; height: 6px; border-radius: 3px; background: var(--surface-3); }
+.dual .cov { position: absolute; left: 12px; right: 12px; top: 6px; width: calc(100% - 24px); height: 14px; overflow: visible; }
+.dual .cov rect { fill: var(--muted); opacity: .45; }
+.dual .cov rect.in { fill: var(--ink-2); opacity: 1; }
+.dual-fill { position: absolute; top: 24px; height: 6px; background: var(--ink); border-radius: 3px; cursor: grab; }
+.dual.dragging, .dual.dragging .dual-fill { cursor: grabbing; }
+.dual input[type="range"] { position: absolute; left: 0; right: 0; top: 11px; width: 100%; height: 32px; margin: 0; pointer-events: none; background: transparent; }
 .dual input[type="range"]::-webkit-slider-runnable-track { height: 32px; background: transparent; }
-.dual input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; pointer-events: auto; width: 24px; height: 24px; margin-top: 4px;
-  border-radius: 50%; background: var(--ink); border: 3px solid var(--surface); box-shadow: var(--shadow-sm); cursor: grab; }
-.dual input[type="range"]::-moz-range-thumb { pointer-events: auto; width: 18px; height: 18px; border-radius: 50%; background: var(--ink); border: 3px solid var(--surface); cursor: grab; }
+.dual input[type="range"]::-webkit-slider-thumb { -webkit-appearance: none; pointer-events: none; width: 24px; height: 24px; margin-top: 4px;
+  border-radius: 50%; background: var(--ink); border: 3px solid var(--surface); box-shadow: 0 1px 4px rgba(0,0,0,.25); }
+.dual input[type="range"]::-moz-range-thumb { pointer-events: none; width: 18px; height: 18px; border-radius: 50%; background: var(--ink); border: 3px solid var(--surface); }
+.dual input[type="range"]:focus-visible::-webkit-slider-thumb { outline: 3px solid var(--focus, #2a6fd6); outline-offset: 1px; }
+.dual input[type="range"]:focus-visible::-moz-range-thumb { outline: 3px solid var(--focus, #2a6fd6); outline-offset: 1px; }
 .ticks.hours { margin: 0 12px; height: 16px; }
 .ticks.hours span:nth-child(1) { left: 0; } .ticks.hours span:nth-child(2) { left: 25%; } .ticks.hours span:nth-child(3) { left: 50%; }
 .ticks.hours span:nth-child(4) { left: 75%; } .ticks.hours span:nth-child(5) { left: 100%; }
 
+.astatus { margin-top: 10px; font-size: 13px; color: var(--ink-2); display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-height: 20px; }
+.astatus:empty { display: none; }
+.astatus .msg { flex: 1 1 200px; line-height: 1.35; }
+.astatus.warn .msg::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #f28a2a; margin-right: 6px; vertical-align: 1px; }
+.astatus.none { background: var(--warn-bg); border-radius: var(--r-md); padding: 10px 12px; }
+.astatus.none .msg b { color: var(--ink); }
+.astatus .acts { display: flex; flex-wrap: wrap; gap: 6px; }
 .legend { margin-top: 12px; font-size: 13px; color: var(--ink-2); }
 .legend:empty { display: none; }
 .legend .top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; margin-bottom: 6px; }
