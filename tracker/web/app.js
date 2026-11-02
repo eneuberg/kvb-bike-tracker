@@ -441,16 +441,76 @@
   // status.json = { ts: time of the latest poll, app: version of the web app }.
   // New ts -> reload live data and the changed history days, re-render.
   // New app -> the pill offers a reload (and does it when you come back to the tab).
-  const FR = { busy: false, last: 0, app: null, newApp: false };
+  const FR = { busy: false, polling: false, last: 0, app: null, newApp: false, st: null, lockUntil: 0, autoTimer: 0, tick: 0 };
+  const clock = (sec) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, '0')}`;
+  const serverMode = () => FR.st?.mode === 'server' && FR.st.manual_s > 0;
+  // seconds until a manual poll is allowed again (0 = now); the server has the final word
+  function manualWait() {
+    if (!serverMode() || !S.live) return 0;
+    // +2 s: the data time is rounded down to the second
+    return Math.max(0, Math.ceil(S.live.t + FR.st.manual_s + 2 - now()), Math.ceil(FR.lockUntil - now()));
+  }
   function renderFresh() {
     const el = $('#fresh'); if (!el) return;
     const L = S.live, stale = !!L && now() - L.t > 40 * 60;
-    el.classList.toggle('busy', FR.busy);
+    el.classList.toggle('busy', FR.busy || FR.polling);
     el.classList.toggle('stale', stale && !FR.newApp);
     el.classList.toggle('newapp', FR.newApp);
+    el.classList.toggle('locked', serverMode() && manualWait() > 0);
     $('#freshText').textContent = FR.newApp ? 'Neue Version' : L ? `${fTime.format(new Date(L.t * 1000))} · vor ${fmtDur(Math.max(0, now() - L.t))}` : 'lädt …';
-    el.setAttribute('aria-label', FR.newApp ? 'Neue Version der Seite laden'
-      : L ? `Datenstand ${fmtWhen(L.t)}. Tippen zum Aktualisieren.` : 'Daten werden geladen');
+    el.setAttribute('aria-label', L ? `Datenstand ${fmtWhen(L.t)}. Details und neu abfragen.` : 'Daten werden geladen');
+    if (!$('#freshPop').hidden) renderPop();
+  }
+  function renderPop() {
+    const L = S.live, st = FR.st, auto = st?.auto_s || 900;
+    $('#fpTime').textContent = L ? `Stand ${fTime.format(new Date(L.t * 1000))} Uhr` : 'lädt …';
+    $('#fpAge').textContent = L ? `vor ${fmtDur(Math.max(0, now() - L.t))}` : '';
+    const btn = $('#fpBtn'), next = L ? L.t + auto : null;
+    if (serverMode()) {
+      const due = next != null && next - now() > 30 ? `nächste etwa ${fTime.format(new Date(next * 1000))} Uhr` : 'nächste läuft gleich';
+      $('#fpAuto').textContent = `Automatisch alle ${Math.round(auto / 60)} Min. abgefragt, ${due}. Neue Daten erscheinen hier von selbst.`;
+      const w = manualWait();
+      btn.disabled = FR.polling || w > 0;
+      btn.textContent = FR.polling ? 'Frage nextbike ab …' : w > 0 ? `Wieder möglich in ${clock(w)}` : 'Jetzt neu abfragen';
+      const m = Math.max(1, Math.round(st.manual_s / 60));
+      $('#fpHint').textContent = `Neu abfragen geht für alle Besucher zusammen höchstens ${m === 1 ? 'einmal pro Minute' : `alle ${m} Minuten`}, damit die Schnittstelle von nextbike nicht überlastet wird. Abfragen von dir und anderen setzen die Wartezeit zurück.`;
+    } else {
+      $('#fpAuto').textContent = `Automatisch etwa alle ${Math.round(auto / 60)} Min. über GitHub. GitHub startet geplante Läufe aber unregelmäßig, Lücken von mehreren Stunden kommen vor.`;
+      btn.disabled = FR.busy;
+      btn.textContent = FR.busy ? 'Prüfe …' : 'Auf neue Daten prüfen';
+      $('#fpHint').textContent = 'Selbst eine neue Abfrage auslösen geht nur in der selbst gehosteten Version (Docker/Coolify). Hier wird nur nachgesehen, ob GitHub inzwischen neue Daten veröffentlicht hat.';
+    }
+    $('#fpNew').hidden = !FR.newApp;
+  }
+  function openPop(open) {
+    const pop = $('#freshPop');
+    pop.hidden = !open;
+    $('#fresh').setAttribute('aria-expanded', String(open));
+    clearInterval(FR.tick);
+    if (open) { renderPop(); FR.tick = setInterval(renderPop, 1000); if (now() - FR.last > 20) checkUpdate(false); }
+  }
+  // in server mode, look again right after the next automatic poll is due
+  function scheduleAutoCheck() {
+    clearTimeout(FR.autoTimer);
+    if (!S.live || !FR.st) return;
+    const at = S.live.t + (FR.st.auto_s || 900) + 25 - now();
+    if (at > 0 && at < 3 * 3600) FR.autoTimer = setTimeout(() => { if (document.visibilityState === 'visible') checkUpdate(false); }, at * 1000);
+  }
+  async function manualRefresh() {
+    if (!serverMode()) { await checkUpdate(true); return; }
+    if (manualWait() > 0 || FR.polling) return;
+    FR.polling = true; renderFresh();
+    const before = S.live?.meta?.ts;
+    try {
+      const r = await fetch('api/refresh', { method: 'POST' });
+      const b = await r.json().catch(() => ({}));
+      if (r.status === 429) { FR.lockUntil = now() + (b.retry_after || 60); toast(`Gerade wurde schon abgefragt. Wieder möglich in ${clock(b.retry_after || 60)}.`); }
+      else if (r.status === 409) { toast('Eine Abfrage läuft gerade, die Daten kommen gleich.'); await new Promise((ok) => setTimeout(ok, 5000)); }
+      else if (!r.ok) toast('nextbike hat gerade nicht geantwortet. Bitte später noch einmal versuchen.');
+      await checkUpdate(false);
+      if (r.ok && S.live?.meta?.ts !== before) toast(`Neu abgefragt: Stand ${fTime.format(new Date(S.live.t * 1000))} Uhr.`);
+    } catch { toast('Keine Verbindung zum Server.'); }
+    finally { FR.polling = false; renderFresh(); }
   }
   async function refreshHistory() {
     const old = new Map((tlIndex || []).map((d) => [d.date, `${d.n}|${d.t1}`]));
@@ -466,7 +526,6 @@
   }
   async function checkUpdate(manual) {
     if (FR.busy) return;
-    if (manual && FR.newApp) { location.reload(); return; }
     FR.busy = true; renderFresh();
     const before = S.live?.meta?.ts;
     try {
@@ -475,6 +534,7 @@
         const r = await fetch(`status.json?t=${Date.now()}`, { cache: 'no-store' });
         if (r.ok) {
           const st = await r.json();
+          FR.st = st;
           ts = st.ts;
           if (FR.app == null) FR.app = S.cfg?.app || st.app;
           if (st.app && FR.app && st.app !== FR.app) FR.newApp = true;
@@ -486,6 +546,7 @@
       if (manual && S.live) toast(fresh || hist ? `Aktualisiert: Stand ${fmtWhen(S.live.t)}.`
         : `Schon aktuell. Die letzte Abfrage war ${fmtWhen(S.live.t)}, neuere Daten gibt es noch nicht.`);
       FR.last = now();
+      scheduleAutoCheck();
     } finally { FR.busy = false; renderFresh(); }
   }
 
@@ -1937,7 +1998,11 @@
     document.addEventListener('visibilitychange', back);
     addEventListener('pageshow', (e) => { if (e.persisted) back(); });
     addEventListener('online', back);
-    $('#fresh').addEventListener('click', () => checkUpdate(true));
+    $('#fresh').addEventListener('click', (e) => { e.stopPropagation(); openPop($('#freshPop').hidden); });
+    $('#fpBtn').addEventListener('click', manualRefresh);
+    $('#fpReload').addEventListener('click', () => location.reload());
+    document.addEventListener('pointerdown', (e) => { if (!$('#freshPop').hidden && !e.target.closest('#freshPop, #fresh')) openPop(false); });
+    addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('#freshPop').hidden) { openPop(false); $('#fresh').focus(); } });
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => location.reload());
   }
 

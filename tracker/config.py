@@ -94,6 +94,10 @@ class Config:
 
     # Server
     port: int = 8080
+    # serve mode: anyone can trigger a poll from the web page, but for all
+    # visitors together at most once per this many seconds (0 = off)
+    manual_min_interval_seconds: int = 180
+    serving: bool = False  # set by `serve`; static builds (GitHub Pages) cannot poll on demand
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -126,4 +130,5 @@ class Config:
             timeline_step_minutes=float(_env("TIMELINE_STEP_MINUTES", "5")),
             analysis_interval_minutes=float(_env("ANALYSIS_INTERVAL_MINUTES", "30")),
             port=int(_env("PORT", "8080")),
+            manual_min_interval_seconds=max(0, int(float(_env("MANUAL_REFRESH_MINUTES", "3")) * 60)),
         )

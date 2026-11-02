@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import functools
+import json
 import http.server
 import logging
 import shutil
@@ -148,8 +149,9 @@ def copy_history_into_site(cfg: Config) -> None:
 
 
 class _Handler(http.server.SimpleHTTPRequestHandler):
-    def __init__(self, *args, site_dir: Path, history_dir: Path, **kwargs):
+    def __init__(self, *args, site_dir: Path, history_dir: Path, poller: "Poller | None" = None, **kwargs):
         self._history_dir = history_dir
+        self._poller = poller
         super().__init__(*args, directory=str(site_dir), **kwargs)
 
     def translate_path(self, path):
@@ -160,6 +162,20 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
             if str(candidate).startswith(str(self._history_dir.resolve())):
                 return str(candidate)
         return super().translate_path(path)
+
+    def do_POST(self):
+        if self.path.split("?", 1)[0].rstrip("/").endswith("/api/refresh") and self._poller:
+            code, body = self._poller.manual()
+            data = json.dumps(body).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            if code == 429:
+                self.send_header("Retry-After", str(body["retry_after"]))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        self.send_error(404)
 
     def end_headers(self):
         if self.path.split("?", 1)[0].endswith((".json", ".png", ".html", "/")):
@@ -189,25 +205,75 @@ def seed_history(cfg: Config) -> int:
     return n
 
 
+class Poller:
+    """One poll at a time, from the schedule or from a visitor.
+
+    The schedule counts from the last poll, so a manual poll also pushes the
+    next automatic one back. Manual polls are limited for all visitors
+    together: at most one per cfg.manual_min_interval_seconds."""
+
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self.lock = threading.Lock()
+        self.last = 0.0  # epoch of the last poll attempt
+
+    def _run(self, manual: bool) -> bool:
+        started = time.time()  # matches the data timestamp the page sees
+        try:
+            # a visitor wants to see the new poll everywhere, incl. the timeline
+            return run_once(self.cfg, force_analysis=manual)
+        except Exception:  # keep the service alive no matter what
+            log.exception("update failed")
+            return False
+        finally:
+            self.last = started
+
+    def poll(self) -> bool:
+        with self.lock:
+            return self._run(manual=False)
+
+    def manual(self) -> tuple[int, dict]:
+        """HTTP status and body for POST /api/refresh."""
+        gap = self.cfg.manual_min_interval_seconds
+        if gap <= 0:
+            return 403, {"ok": False, "reason": "disabled"}
+        if not self.lock.acquire(blocking=False):
+            return 409, {"ok": False, "reason": "running"}
+        try:  # checked under the lock, so two visitors can never both poll
+            wait = self.last + gap - time.time()
+            if wait > 0:
+                return 429, {"ok": False, "reason": "too_soon", "retry_after": int(wait) + 1}
+            log.info("manual refresh requested")
+            ok = self._run(manual=True)
+            return (200 if ok else 502), {"ok": ok, "reason": None if ok else "fetch_failed"}
+        finally:
+            self.lock.release()
+
+    def due_in(self) -> float:
+        return self.last + self.cfg.update_interval_seconds - time.time()
+
+
 def serve(cfg: Config) -> None:
+    cfg.serving = True
     cfg.site_dir.mkdir(parents=True, exist_ok=True)
     seed_history(cfg)
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    poller = Poller(cfg)
 
     def loop():
         while not stop.is_set():
-            t0 = time.monotonic()
-            try:
-                run_once(cfg, force_analysis=False)
-            except Exception:  # keep the loop alive no matter what
-                log.exception("update failed")
-            stop.wait(max(cfg.update_interval_seconds - (time.monotonic() - t0), 5))
+            wait = poller.due_in()
+            if wait > 0:
+                stop.wait(min(wait, 15))  # re-check: a manual poll moves the schedule
+                continue
+            poller.poll()
 
     threading.Thread(target=loop, daemon=True).start()
-    handler = functools.partial(_Handler, site_dir=cfg.site_dir, history_dir=cfg.history_dir)
+    handler = functools.partial(_Handler, site_dir=cfg.site_dir, history_dir=cfg.history_dir, poller=poller)
     httpd = http.server.ThreadingHTTPServer(("0.0.0.0", cfg.port), handler)
-    log.info("serving %s on :%s, updating every %ss", cfg.site_dir, cfg.port, cfg.update_interval_seconds)
+    log.info("serving %s on :%s, updating every %ss, manual refresh every %ss at most",
+             cfg.site_dir, cfg.port, cfg.update_interval_seconds, cfg.manual_min_interval_seconds)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     stop.wait()
     httpd.shutdown()

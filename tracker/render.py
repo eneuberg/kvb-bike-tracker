@@ -185,6 +185,22 @@ def copy_web(cfg: Config) -> list[Path]:
     return out
 
 
+def write_status(cfg: Config, ts: str | None) -> Path:
+    """status.json: what the open web page needs to know about freshness.
+
+    ts        time of the latest poll (ISO, UTC)
+    app       web app version (hash), so pages notice an update
+    mode      "server" (container, can poll on demand) or "static" (GitHub Pages)
+    auto_s    planned seconds between automatic polls
+    manual_s  minimum seconds between manual polls for all visitors (0 = not possible)
+    """
+    manual = cfg.manual_min_interval_seconds if cfg.serving else 0
+    return write_json(cfg.site_dir / "status.json", {
+        "ts": ts, "app": app_version(), "mode": "server" if cfg.serving else "static",
+        "auto_s": cfg.update_interval_seconds, "manual_s": manual,
+    })
+
+
 def write_json(path: Path, data: Any) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -201,7 +217,7 @@ def write_site(cfg: Config, bikes: list[dict[str, Any]], stations: list[dict[str
 
     written.append(write_json(site / "latest.json", {"meta": meta, "bikes": bikes, "stations": stations}))
     # tiny file the open web app polls to notice new data or a new app version
-    written.append(write_json(site / "status.json", {"ts": meta.get("ts"), "app": app_version()}))
+    written.append(write_status(cfg, meta.get("ts")))
 
     written += copy_web(cfg)
 

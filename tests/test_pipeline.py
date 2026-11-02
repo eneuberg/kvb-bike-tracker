@@ -135,3 +135,36 @@ def test_export_on_simulated_history(tmp_path):
             assert set(gone) <= present
             present -= set(gone)
     assert res["since"]
+
+
+def test_manual_refresh_rate_limit(tmp_path, monkeypatch):
+    """Manual polls: one at a time, at most one per interval for everyone."""
+    import time as _time
+
+    from tracker import main as m
+
+    cfg = _cfg(tmp_path)
+    cfg.serving = True
+    cfg.manual_min_interval_seconds = 180
+    calls = []
+    monkeypatch.setattr(m, "run_once", lambda c, force_analysis=True: calls.append(force_analysis) or True)
+    p = m.Poller(cfg)
+    assert p.manual() == (200, {"ok": True, "reason": None})
+    code, body = p.manual()
+    assert code == 429 and 170 <= body["retry_after"] <= 181
+    p.last = _time.time() - 181
+    assert p.manual()[0] == 200
+    p.lock.acquire()
+    p.last = 0
+    assert p.manual()[0] == 409  # a poll is running
+    p.lock.release()
+    assert calls == [True, True]
+    cfg.manual_min_interval_seconds = 0
+    assert p.manual()[0] == 403
+    # status.json tells the page what is possible
+    st = json.loads(render.write_status(cfg, "2026-11-02T17:00:00Z").read_text())
+    assert st["mode"] == "server" and st["manual_s"] == 0
+    cfg.serving = False
+    cfg.manual_min_interval_seconds = 180
+    st = json.loads(render.write_status(cfg, None).read_text())
+    assert st["mode"] == "static" and st["manual_s"] == 0

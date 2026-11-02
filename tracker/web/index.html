@@ -17,10 +17,17 @@
 <body>
 <div id="map" aria-label="Karte der KVB-Räder"></div>
 
-<button class="fresh" id="fresh" type="button" aria-label="Daten aktualisieren">
+<button class="fresh" id="fresh" type="button" aria-label="Datenstand" aria-haspopup="dialog" aria-expanded="false" aria-controls="freshPop">
   <span class="dot" aria-hidden="true"></span><span id="freshText">lädt …</span>
   <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4.5v4h-4"/></svg>
 </button>
+<div class="fresh-pop" id="freshPop" role="dialog" aria-label="Datenstand" hidden>
+  <div class="fp-head"><b id="fpTime">–</b><span id="fpAge"></span></div>
+  <p class="fp-note" id="fpAuto"></p>
+  <button class="btn-wide" id="fpBtn" type="button">Jetzt neu abfragen</button>
+  <p class="fp-note small" id="fpHint"></p>
+  <div class="fp-new" id="fpNew" hidden><span>Es gibt eine neue Version der Seite.</span><button class="btn sm ghost" id="fpReload" type="button">Neu laden</button></div>
+</div>
 
 <div class="map-tools" id="mapTools">
   <button class="tool" id="btnLocate" type="button" aria-label="Mein Standort">

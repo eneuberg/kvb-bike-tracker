@@ -76,6 +76,7 @@ On the first start with an empty volume, the container copies the history that G
 | env var | default | description |
 |---|---|---|
 | `UPDATE_INTERVAL_MINUTES` | `13` | poll interval in minutes (fractions allowed, minimum 1); 13 is prime, so it doesn't lock onto hourly patterns |
+| `MANUAL_REFRESH_MINUTES` | `3` | container only: visitors can trigger a poll from the page, for all visitors together at most once per this many minutes (`0` = off). The automatic schedule counts from the latest poll, manual or not |
 | `NEXTBIKE_DOMAIN` | `kg` | nextbike network ID (`kg` = KVB-Rad Köln) |
 | `NEXTBIKE_CITY_ID` | – | restrict to one nextbike city UID instead |
 | `MOVE_THRESHOLD_M` | `25` | movement threshold for `moved` events |
@@ -87,7 +88,7 @@ On the first start with an empty volume, the container copies the history that G
 
 The container serves `/` (interactive map), `/map.png`, `/heatmap.png`, `/latest.json` (current state), `/status.json` (time of the latest poll and app version) and `/history/` (all CSVs).
 
-An open page checks `status.json` every minute and when you return to the tab. New data is loaded in place; a new app version shows "Neue Version" in the top-right badge. The badge also shows the data time; tap it to check now.
+An open page checks `status.json` every minute, right after the next automatic poll is due, and when you return to the tab. New data is loaded in place. The badge top right shows the data time; tapping it opens a small panel with the schedule and, in the container, a "Jetzt neu abfragen" button (`POST /api/refresh`). The button is greyed out with a countdown until the minimum gap has passed; the limit is enforced on the server for all visitors together (one poll at a time, `429` with `Retry-After` when too early). On GitHub Pages the button only checks whether newer files have been published, because a static site cannot start a poll. A new app version shows "Neue Version" in the badge.
 
 Locally:
 

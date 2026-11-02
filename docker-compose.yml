@@ -9,6 +9,9 @@ services:
       # How often to poll the nextbike API (minutes, fractions allowed, min 1).
       # 13 (a prime) avoids locking onto hourly or quarter-hourly patterns.
       - UPDATE_INTERVAL_MINUTES=${UPDATE_INTERVAL_MINUTES:-13}
+      # Visitors can trigger a poll from the page ("Jetzt neu abfragen"), but for
+      # everyone together at most once per this many minutes. 0 = off.
+      - MANUAL_REFRESH_MINUTES=${MANUAL_REFRESH_MINUTES:-3}
       # nextbike network id; "kg" = KVB-Rad Köln. Or pin one city via NEXTBIKE_CITY_ID
       - NEXTBIKE_DOMAIN=${NEXTBIKE_DOMAIN:-kg}
       - NEXTBIKE_CITY_ID=${NEXTBIKE_CITY_ID:-}
