@@ -1,9 +1,10 @@
-/* KVB-Rad Tracker — Live / Verlauf / Analyse.
-   MapLibre GL renders everything on the GPU, so markers, heatmaps and grids
-   scale continuously while zooming instead of redrawing afterwards. */
+/* KVB-Rad Tracker.
+   Two views: "Karte" (live and history on one timeline, live at the right end)
+   and "Analyse" (free filters, computed in a web worker from the raw polls).
+   MapLibre GL renders on the GPU, so everything scales while zooming. */
 'use strict';
 (() => {
-  // ---------------------------------------------------------------- helpers
+  // ================================================================ helpers
   const $ = (s, el = document) => el.querySelector(s);
   const $$ = (s, el = document) => [...el.querySelectorAll(s)];
   const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
@@ -18,76 +19,85 @@
   const fDay = new Intl.DateTimeFormat('de-DE', { weekday: 'short', timeZone: TZ });
   const fDM = new Intl.DateTimeFormat('de-DE', { day: '2-digit', month: '2-digit', timeZone: TZ });
   const fHour = new Intl.DateTimeFormat('de-DE', { hour: 'numeric', hourCycle: 'h23', timeZone: TZ });
-  const fWd = new Intl.DateTimeFormat('en-US', { weekday: 'short', timeZone: TZ });
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const localHour = (t) => +fHour.formatToParts(new Date(t * 1000)).find((x) => x.type === 'hour').value % 24;
-  const isWeekend = (t) => ['Sat', 'Sun'].includes(fWd.format(new Date(t * 1000)));
   const now = () => Date.now() / 1000;
   const hav = (a, b, c, d) => {
-    const r = 6371000, p1 = a * Math.PI / 180, p2 = c * Math.PI / 180;
-    const x = Math.sin((p2 - p1) / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin((d - b) * Math.PI / 360) ** 2;
+    const r = 6371000, p1 = (a * Math.PI) / 180, p2 = (c * Math.PI) / 180;
+    const x = Math.sin((p2 - p1) / 2) ** 2 + Math.cos(p1) * Math.cos(p2) * Math.sin(((d - b) * Math.PI) / 360) ** 2;
     return 2 * r * Math.asin(Math.sqrt(x));
   };
-  const fmtDist = (m) => m < 950 ? `${Math.round(m / 10) * 10} m` : `${nf1.format(m / 1000)} km`;
+  const fmtDist = (m) => (m < 950 ? `${Math.round(m / 10) * 10} m` : `${nf1.format(m / 1000)} km`);
   const fmtDur = (s) => {
     if (s < 3600) return `${Math.max(1, Math.round(s / 60))} Min.`;
     if (s < 86400 * 2) return `${nf1.format(s / 3600)} Std.`;
-    return `${nf1.format(s / 86400)} Tagen`;
+    return `${nf1.format(s / 86400)} Tage`;
   };
-  const ago = (t) => fmtDur(Math.max(0, now() - t));
-  const dayLabel = (d) => ({ wd: 'Mo–Fr', we: 'Sa/So', all: 'alle Tage' }[d]);
+  const fmtWhen = (t) => `${fDate.format(new Date(t * 1000))}, ${fTime.format(new Date(t * 1000))} Uhr`;
+  const minToStr = (m) => `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
   async function getJSON(url) {
     const r = await fetch(`${url}?v=${Math.floor(Date.now() / 60000)}`);
     if (!r.ok) throw new Error(`${url}: ${r.status}`);
     return r.json();
   }
   let toastTimer;
-  function toast(msg, ms = 3500) {
+  function toast(msg, ms = 3800) {
     const el = $('#toast');
     el.textContent = msg; el.hidden = false;
     clearTimeout(toastTimer); toastTimer = setTimeout(() => { el.hidden = true; }, ms);
   }
 
-  // ---------------------------------------------------------------- colours
+  // ================================================================ colours
   const C = {
     station: css('--station'), free: css('--free'), ink: css('--ink'), surface: css('--surface'),
-    wd: css('--wd'), we: css('--we'), muted: css('--muted'),
+    wd: css('--wd'), we: css('--we'), muted: css('--muted'), trip: css('--trip'),
   };
   const R = DARK ? {
-    seq: ['#1b2a42', '#184f95', '#2a78d6', '#6da7ec', '#cde2fb'],
-    heat: ['rgba(194,65,12,0)', '#7c2d12', '#c2410c', '#f97316', '#fdba74', '#ffedd5'],
-    red: ['#3a1f22', '#7f2a2a', '#c53b3b', '#e66767', '#f6c3c2'],
-    div: { neg: ['#e66767', '#a83a3a', '#5a2e2e'], mid: '#383835', pos: ['#2a4f80', '#3987e5', '#86b6ef'] },
-    idle: ['#3b2d99', '#6250d6', '#9085e9', '#c9c2f5'],
+    seq: ['#123056', '#1c5cab', '#3987e5', '#6da7ec'],
+    heat: ['rgba(194,65,12,0)', '#7c2d12', '#c2410c', '#ea580c', '#fb923c'],
+    red: ['#4a2326', '#8f2f2f', '#c53b3b', '#e66767'],
+    blue: ['#1b3557', '#1c5cab', '#3987e5', '#86b6ef'],
+    div: { neg: ['#e66767', '#a83a3a', '#5a2e2e'], mid: '#3a3f4a', pos: ['#2a4f80', '#3987e5', '#86b6ef'] },
+    idle: ['#2f2580', '#4f3fbf', '#7a6cf0', '#a99ff5', '#d5cffb'],
   } : {
-    seq: ['#cde2fb', '#86b6ef', '#3987e5', '#1c5cab', '#0d366b'],
-    heat: ['rgba(235,104,52,0)', '#fbd0b9', '#f59a6b', '#eb6834', '#c2410c', '#7c2d12'],
-    red: ['#fde2e1', '#f6a3a2', '#e34948', '#b42c2c', '#6e1414'],
-    div: { neg: ['#e34948', '#ee8a89', '#f6c3c2'], mid: '#ece9e4', pos: ['#b7d3f6', '#6da7ec', '#2a78d6'] },
-    idle: ['#b9b0f3', '#9085e9', '#6250d6', '#3b2d99'],
+    seq: ['#cde2fb', '#86b6ef', '#3987e5', '#1c5cab'],
+    heat: ['rgba(235,104,52,0)', '#fbd0b9', '#f59a6b', '#eb6834', '#b4380f'],
+    red: ['#fde2e1', '#f6a3a2', '#e34948', '#9e2525'],
+    blue: ['#cde2fb', '#86b6ef', '#2a78d6', '#184f95'],
+    div: { neg: ['#e34948', '#ee8a89', '#f6c3c2'], mid: '#e6e3de', pos: ['#b7d3f6', '#6da7ec', '#2a78d6'] },
+    idle: ['#d5cffb', '#a99ff5', '#7a6cf0', '#5240d0', '#2f2580'],
   };
   const gradient = (cols) => `linear-gradient(90deg, ${cols.join(', ')})`;
+  function hexA(hex, a) {
+    const h = hex.replace('#', '');
+    const n = parseInt(h.length === 3 ? h.split('').map((c) => c + c).join('') : h, 16);
+    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+  }
+  const toStops = (cols, a0, a1) => cols.map((c, k) => {
+    const n = parseInt(c.slice(1), 16), f = k / (cols.length - 1);
+    return [f, (n >> 16) & 255, (n >> 8) & 255, n & 255, a0 + (a1 - a0) * f];
+  });
+  const PIXEL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 
-  // ---------------------------------------------------------------- state
-  const t0 = now();
+  // ================================================================ state
   const S = {
-    mode: 'live', tab: 'verfuegbarkeit', hour: localHour(t0), day: isWeekend(t0) ? 'we' : 'wd',
-    f: null, tlEnd: null, raster: null, stList: null, wPlaying: false,
-    layers: { live: { stations: true, free: true, heat: false }, verlauf: { stations: true, free: true, heat: false } },
-    live: null, tl: null, frame: -1, span: 168, playing: false, speed: 1,
-    sel: null, me: null, trail: null, cfg: null,
+    mode: 'karte', tab: 'erreichbarkeit', cfg: null, f: null,
+    live: null, tl: null, trips: null, me: null, sel: null, trail: null,
+    k: { span: 24, end: null, isLive: true, frame: -1, clock: 0, playing: false, speed: 1, liveInuse: null },
+    layers: { stations: true, free: true, trips: true, heat: false },
+    wPlaying: false, stList: null,
   };
 
-  // ---------------------------------------------------------------- map
+  // ================================================================ map
   let map, styleReady = false, hasGlyphs = false;
   const KOELN = [[6.77, 50.83], [7.16, 51.08]];
+  const EMPTY = { type: 'FeatureCollection', features: [] };
 
   function rasterStyle(cfg) {
     const url = cfg.raster_url || 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
     return {
       version: 8,
-      sources: { base: { type: 'raster', tiles: [url], tileSize: 256, maxzoom: 19,
-        attribution: cfg.raster_attribution || '© OpenStreetMap contributors' } },
+      sources: { base: { type: 'raster', tiles: [url], tileSize: 256, maxzoom: 19, attribution: cfg.raster_attribution || '© OpenStreetMap contributors' } },
       layers: [
         { id: 'bg', type: 'background', paint: { 'background-color': css('--bg') } },
         { id: 'base', type: 'raster', source: 'base', paint: DARK
@@ -99,7 +109,7 @@
 
   function initMap(cfg) {
     const attempts = [DARK ? cfg.style_dark : cfg.style_light, cfg.style_light, rasterStyle(cfg)].filter(Boolean);
-    let attempt = 0;
+    let attempt = 0, timer;
     map = new maplibregl.Map({
       container: 'map', style: attempts[0], bounds: KOELN, fitBoundsOptions: { padding: 20 },
       minZoom: 9, maxZoom: 19, attributionControl: false, dragRotate: false, pitchWithRotate: false,
@@ -110,13 +120,10 @@
     map.addControl(new maplibregl.AttributionControl({ compact: true }), isDesktop() ? 'bottom-right' : 'top-left');
     const next = () => {
       if (styleReady || attempt >= attempts.length - 1) return;
-      attempt += 1;
-      map.setStyle(attempts[attempt]);
-      armTimeout();
+      attempt += 1; map.setStyle(attempts[attempt]); arm();
     };
-    let timer;
-    const armTimeout = () => { clearTimeout(timer); timer = setTimeout(next, 9000); };
-    armTimeout();
+    const arm = () => { clearTimeout(timer); timer = setTimeout(next, 9000); };
+    arm();
     map.on('error', (e) => { if (!styleReady) { console.warn('style failed, falling back', e.error); next(); } });
     map.on('style.load', () => {
       clearTimeout(timer);
@@ -124,14 +131,12 @@
       styleReady = true;
       hasGlyphs = !!map.getStyle().glyphs;
       germanLabels();
-      // MapLibre opens the compact attribution on load; keep it as the (i) button
       map.once('idle', () => $('.maplibregl-ctrl-attrib')?.classList.remove('maplibregl-compact-show'));
       setupLayers();
       boot();
     });
   }
 
-  // Basemap labels in German where OSM has a German name ("Köln", not "Cologne").
   function germanLabels() {
     for (const l of map.getStyle().layers) {
       if (l.type !== 'symbol') continue;
@@ -143,45 +148,51 @@
     }
   }
 
-  const EMPTY = { type: 'FeatureCollection', features: [] };
   const zoomRadius = (z10, z14, z18) => ['interpolate', ['exponential', 1.6], ['zoom'], 10, z10, 14, z14, 18, z18];
+  function heatPaint(weight) {
+    return {
+      'heatmap-weight': weight,
+      'heatmap-intensity': ['interpolate', ['linear'], ['zoom'], 10, 0.5, 13, 1.1, 16, 2.2],
+      'heatmap-radius': ['interpolate', ['exponential', 1.7], ['zoom'], 10, 9, 13, 20, 16, 52, 18, 120],
+      'heatmap-color': ['interpolate', ['linear'], ['heatmap-density'], 0, R.heat[0], 0.15, R.heat[1], 0.4, R.heat[2], 0.7, R.heat[3], 1, R.heat[4]],
+      'heatmap-opacity': ['interpolate', ['linear'], ['zoom'], 14, 0.85, 18, 0.55],
+    };
+  }
 
   function setupLayers() {
     const before = map.getStyle().layers.find((l) => l.type === 'symbol')?.id;
-    for (const id of ['bikes', 'stations', 'netc', 'idle', 'sel', 'me', 'trail', 'anst', 'qpt'])
+    for (const id of ['bikes', 'stations', 'netc', 'idle', 'sel', 'me', 'trail', 'anst', 'qpt', 'tripdots', 'particles'])
       map.addSource(id, { type: 'geojson', data: EMPTY });
     map.addSource('flows', { type: 'geojson', data: EMPTY, lineMetrics: true });
-    map.addSource('raster', { type: 'image', url: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
-      coordinates: [[6.76, 51.09], [7.18, 51.09], [7.18, 50.83], [6.76, 50.83]] });
+    map.addSource('trips', { type: 'geojson', data: EMPTY, lineMetrics: true });
+    map.addSource('raster', { type: 'image', url: PIXEL, coordinates: [[6.76, 51.09], [7.18, 51.09], [7.18, 50.83], [6.76, 50.83]] });
 
-    // under basemap labels
+    // under the basemap labels
     map.addLayer({ id: 'raster-l', type: 'raster', source: 'raster', layout: { visibility: 'none' },
       paint: { 'raster-resampling': 'linear', 'raster-opacity': 0.9, 'raster-fade-duration': 0 } }, before);
-    map.addLayer({ id: 'live-heat', type: 'heatmap', source: 'bikes', layout: { visibility: 'none' },
-      paint: heatPaint(1, 1) }, before);
+    map.addLayer({ id: 'live-heat', type: 'heatmap', source: 'bikes', layout: { visibility: 'none' }, paint: heatPaint(1) }, before);
     map.addLayer({ id: 'qpt-fill', type: 'fill', source: 'qpt', filter: ['==', ['geometry-type'], 'Polygon'], layout: { visibility: 'none' },
       paint: { 'fill-color': hexA(C.ink, 0.06) } }, before);
-    map.addLayer({ id: 'qpt-line', type: 'line', source: 'qpt', filter: ['==', ['geometry-type'], 'Polygon'], layout: { visibility: 'none' },
-      paint: { 'line-color': C.ink, 'line-width': 1.6, 'line-dasharray': [2, 2] } });
-    map.addLayer({ id: 'qpt-dot', type: 'circle', source: 'qpt', filter: ['==', ['geometry-type'], 'Point'], layout: { visibility: 'none' },
-      paint: { 'circle-radius': 6, 'circle-color': C.ink, 'circle-stroke-color': C.surface, 'circle-stroke-width': 2.5 } });
-    map.addLayer({ id: 'netc', type: 'circle', source: 'netc', layout: { visibility: 'none' },
-      paint: { 'circle-radius': ['interpolate', ['exponential', 1.6], ['zoom'], 10, ['*', ['get', 'rel'], 14], 14, ['*', ['get', 'rel'], 44]],
-        'circle-color': ['interpolate', ['linear'], ['get', 'v'], -1, R.div.neg[0], -0.5, R.div.neg[1], -0.15, R.div.neg[2], 0, R.div.mid, 0.15, R.div.pos[0], 0.5, R.div.pos[1], 1, R.div.pos[2]],
-        'circle-opacity': 0.85, 'circle-stroke-color': C.surface, 'circle-stroke-width': 1 } });
 
     // on top
+    map.addLayer({ id: 'netc', type: 'circle', source: 'netc', layout: { visibility: 'none' },
+      paint: { 'circle-radius': ['interpolate', ['exponential', 1.6], ['zoom'], 10, ['*', ['get', 'rel'], 9], 14, ['*', ['get', 'rel'], 26], 17, ['*', ['get', 'rel'], 60]],
+        'circle-color': ['interpolate', ['linear'], ['get', 'v'], -1, R.div.neg[0], -0.5, R.div.neg[1], -0.15, R.div.neg[2], 0, R.div.mid, 0.15, R.div.pos[0], 0.5, R.div.pos[1], 1, R.div.pos[2]],
+        'circle-opacity': 0.7, 'circle-stroke-color': C.surface, 'circle-stroke-width': 0.8 } });
     map.addLayer({ id: 'flows-line', type: 'line', source: 'flows', layout: { visibility: 'none', 'line-cap': 'round' },
-      paint: { 'line-width': ['interpolate', ['linear'], ['zoom'], 10, ['*', ['get', 'w'], 4], 14, ['*', ['get', 'w'], 9]],
-        'line-gradient': ['interpolate', ['linear'], ['line-progress'], 0, hexA(C.ink, 0.05), 0.6, hexA(C.ink, 0.45), 1, hexA(C.ink, 0.9)] } });
+      paint: { 'line-width': ['interpolate', ['linear'], ['zoom'], 10, ['+', 0.6, ['*', ['get', 'w'], 3]], 15, ['+', 1, ['*', ['get', 'w'], 8]]],
+        'line-gradient': ['interpolate', ['linear'], ['line-progress'], 0, hexA(C.trip, 0.06), 1, hexA(C.trip, 0.75)] } });
+    map.addLayer({ id: 'particles', type: 'circle', source: 'particles', layout: { visibility: 'none' },
+      paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 1.8, 15, 3.6], 'circle-color': C.trip,
+        'circle-stroke-color': C.surface, 'circle-stroke-width': 0.8, 'circle-opacity': ['get', 'o'], 'circle-stroke-opacity': ['get', 'o'] } });
     map.addLayer({ id: 'trail-line', type: 'line', source: 'trail', filter: ['==', ['geometry-type'], 'LineString'],
       layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' },
       paint: { 'line-color': C.ink, 'line-width': 2.2, 'line-dasharray': [1.5, 1.5], 'line-opacity': 0.75 } });
     map.addLayer({ id: 'trail-pts', type: 'circle', source: 'trail', filter: ['==', ['geometry-type'], 'Point'],
-      layout: { visibility: 'none' },
-      paint: { 'circle-radius': zoomRadius(4, 7, 10), 'circle-color': C.surface, 'circle-stroke-color': C.ink, 'circle-stroke-width': 2 } });
+      layout: { visibility: 'none' }, paint: { 'circle-radius': zoomRadius(4, 7, 10), 'circle-color': C.surface, 'circle-stroke-color': C.ink, 'circle-stroke-width': 2 } });
     map.addLayer({ id: 'idle-dots', type: 'circle', source: 'idle', layout: { visibility: 'none' },
-      paint: { 'circle-radius': zoomRadius(2.4, 5, 10), 'circle-color': ['match', ['get', 'c'], 0, R.idle[0], 1, R.idle[1], 2, R.idle[2], R.idle[3]],
+      paint: { 'circle-radius': zoomRadius(2.4, 5, 10),
+        'circle-color': ['interpolate', ['linear'], ['get', 'l'], 0, R.idle[0], 0.25, R.idle[1], 0.5, R.idle[2], 0.75, R.idle[3], 1, R.idle[4]],
         'circle-stroke-color': C.surface, 'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 11, 0.3, 15, 1.2] } });
     map.addLayer({ id: 'free-dots', type: 'circle', source: 'bikes', filter: ['==', ['get', 'k'], 0],
       paint: { 'circle-radius': zoomRadius(1.8, 4.2, 9), 'circle-color': C.free,
@@ -198,19 +209,23 @@
           'text-size': ['interpolate', ['linear'], ['zoom'], 12.6, 9.5, 16, 13], 'text-allow-overlap': true, 'text-ignore-placement': true },
         paint: { 'text-color': ['case', ['==', ['get', 'n'], 0], C.station, '#ffffff'] } });
     }
+    map.addLayer({ id: 'trips-line', type: 'line', source: 'trips', layout: { visibility: 'none', 'line-cap': 'round' },
+      paint: { 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 1.4, 15, 3],
+        'line-gradient': ['interpolate', ['linear'], ['line-progress'], 0, hexA(C.trip, 0), 1, hexA(C.trip, 0.85)], 'line-opacity': ['get', 'o'] } });
+    map.addLayer({ id: 'trips-dot', type: 'circle', source: 'tripdots', layout: { visibility: 'none' },
+      paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 3, 15, 6], 'circle-color': C.trip, 'circle-stroke-color': C.surface, 'circle-stroke-width': 1.5 } });
     map.addLayer({ id: 'an-st', type: 'circle', source: 'anst', layout: { visibility: 'none' },
-      paint: { 'circle-radius': ['interpolate', ['exponential', 1.6], ['zoom'], 10, ['+', 2.5, ['*', 0.8, ['sqrt', ['get', 'a']]]],
-          14, ['+', 6, ['*', 2.4, ['sqrt', ['get', 'a']]]], 18, ['+', 12, ['*', 4, ['sqrt', ['get', 'a']]]]],
-        'circle-color': ['interpolate', ['linear'], ['get', 'p'], 0, R.red[0], 25, R.red[1], 50, R.red[2], 75, R.red[3], 100, R.red[4]],
-        'circle-stroke-color': C.surface, 'circle-stroke-width': 1.2 } });
-    map.addLayer({ id: 'sel-ring', type: 'circle', source: 'sel', filter: ['==', ['geometry-type'], 'Point'],
+      paint: { 'circle-radius': ['interpolate', ['exponential', 1.6], ['zoom'], 10, ['+', 2.5, ['*', 0.9, ['sqrt', ['get', 'a']]]],
+          14, ['+', 6, ['*', 2.6, ['sqrt', ['get', 'a']]]], 18, ['+', 12, ['*', 4.2, ['sqrt', ['get', 'a']]]]],
+        'circle-color': R.blue[2], 'circle-stroke-color': C.surface, 'circle-stroke-width': 1.2 } });
+    map.addLayer({ id: 'qpt-line', type: 'line', source: 'qpt', filter: ['==', ['geometry-type'], 'Polygon'], layout: { visibility: 'none' },
+      paint: { 'line-color': C.ink, 'line-width': 1.6, 'line-dasharray': [2, 2] } });
+    map.addLayer({ id: 'qpt-dot', type: 'circle', source: 'qpt', filter: ['==', ['geometry-type'], 'Point'], layout: { visibility: 'none' },
+      paint: { 'circle-radius': 6, 'circle-color': C.ink, 'circle-stroke-color': C.surface, 'circle-stroke-width': 2.5 } });
+    map.addLayer({ id: 'sel-ring', type: 'circle', source: 'sel',
       paint: { 'circle-radius': zoomRadius(9, 15, 24), 'circle-color': 'rgba(0,0,0,0)', 'circle-stroke-color': C.ink, 'circle-stroke-width': 2.5 } });
-    map.addLayer({ id: 'sel-cell', type: 'line', source: 'sel', filter: ['==', ['geometry-type'], 'Polygon'],
-      paint: { 'line-color': C.ink, 'line-width': 2.5 } });
-    map.addLayer({ id: 'me-acc', type: 'circle', source: 'me',
-      paint: { 'circle-radius': zoomRadius(10, 18, 30), 'circle-color': hexA(C.station, 0.15), 'circle-stroke-width': 0 } });
-    map.addLayer({ id: 'me-dot', type: 'circle', source: 'me',
-      paint: { 'circle-radius': 6.5, 'circle-color': C.station, 'circle-stroke-color': '#fff', 'circle-stroke-width': 2.5 } });
+    map.addLayer({ id: 'me-acc', type: 'circle', source: 'me', paint: { 'circle-radius': zoomRadius(10, 18, 30), 'circle-color': hexA(C.station, 0.15) } });
+    map.addLayer({ id: 'me-dot', type: 'circle', source: 'me', paint: { 'circle-radius': 6.5, 'circle-color': C.station, 'circle-stroke-color': '#fff', 'circle-stroke-width': 2.5 } });
 
     map.on('click', onMapClick);
     if (matchMedia('(hover: hover)').matches) {
@@ -219,56 +234,34 @@
         if (raf) return;
         raf = requestAnimationFrame(() => {
           raf = 0;
-          const anyPoint = S.mode === 'analyse' && (S.tab === 'verfuegbarkeit' || S.tab === 'dichte');
-          map.getCanvas().style.cursor = anyPoint ? 'crosshair' : pick(e.point) ? 'pointer' : '';
+          map.getCanvas().style.cursor = anyPointTab() ? 'crosshair' : pick(e.point) ? 'pointer' : '';
         });
       });
     }
   }
 
-  function heatPaint(weight, intensity) {
-    return {
-      'heatmap-weight': weight,
-      'heatmap-intensity': ['interpolate', ['linear'], ['zoom'], 10, 0.5 * intensity, 13, 1.1 * intensity, 16, 2.2 * intensity],
-      'heatmap-radius': ['interpolate', ['exponential', 1.7], ['zoom'], 10, 9, 13, 20, 16, 52, 18, 120],
-      'heatmap-color': ['interpolate', ['linear'], ['heatmap-density'], 0, R.heat[0], 0.12, R.heat[1], 0.35, R.heat[2],
-        0.6, R.heat[3], 0.85, R.heat[4], 1, R.heat[5]],
-      'heatmap-opacity': ['interpolate', ['linear'], ['zoom'], 14, 0.85, 18, 0.55],
-    };
-  }
-
-  function hexA(hex, a) {
-    const h = hex.replace('#', '');
-    const n = parseInt(h.length === 3 ? h.split('').map((c) => c + c).join('') : h, 16);
-    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
-  }
-
-  const setData = (id, data) => map.getSource(id)?.setData(data);
+  const setData = (id, data) => map?.getSource(id)?.setData(data);
   const vis = (id, on) => map.getLayer(id) && map.setLayoutProperty(id, 'visibility', on ? 'visible' : 'none');
   const isVis = (id) => map.getLayer(id) && map.getLayoutProperty(id, 'visibility') !== 'none';
+  const anyPointTab = () => S.mode === 'analyse' && (S.tab === 'erreichbarkeit' || S.tab === 'dichte');
 
   function applyVisibility() {
-    const m = S.mode, t = S.tab;
-    const L = S.layers[m] || {};
-    const liveish = m === 'live' || m === 'verlauf';
-    vis('stations-c', liveish && L.stations);
-    vis('stations-t', liveish && L.stations);
-    vis('free-dots', liveish && L.free);
-    vis('live-heat', liveish && L.heat);
-    vis('trail-line', m === 'verlauf' && !!S.trail);
-    vis('trail-pts', m === 'verlauf' && !!S.trail);
-    const a = m === 'analyse';
-    vis('raster-l', a && (t === 'verfuegbarkeit' || t === 'dichte'));
-    const q = a && S.sel?.type === 'point' && (t === 'verfuegbarkeit' || t === 'dichte');
+    if (!styleReady) return;
+    const k = S.mode === 'karte', a = !k, t = S.tab, L = S.layers;
+    vis('stations-c', k && L.stations); vis('stations-t', k && L.stations);
+    vis('free-dots', k && L.free); vis('live-heat', k && L.heat);
+    vis('trips-line', k && L.trips); vis('trips-dot', k && L.trips);
+    vis('trail-line', k && !!S.trail); vis('trail-pts', k && !!S.trail);
+    vis('raster-l', a && (t === 'erreichbarkeit' || t === 'dichte'));
+    const q = anyPointTab() && S.sel?.type === 'point';
     vis('qpt-fill', q); vis('qpt-line', q); vis('qpt-dot', q);
-    vis('netc', a && t === 'stroeme');
-    vis('flows-line', a && t === 'stroeme');
+    vis('netc', a && t === 'stroeme'); vis('flows-line', a && t === 'stroeme'); vis('particles', a && t === 'stroeme');
     vis('an-st', a && t === 'stationen');
     vis('idle-dots', a && t === 'standzeit');
   }
 
-  // ---------------------------------------------------------------- picking
-  const PRIORITY = ['stations-c', 'an-st', 'free-dots', 'idle-dots', 'trail-pts', 'netc'];
+  // ================================================================ picking
+  const PRIORITY = ['stations-c', 'an-st', 'free-dots', 'idle-dots', 'trips-dot', 'trail-pts', 'netc'];
   function pick(pt) {
     const layers = PRIORITY.filter(isVis);
     if (!layers.length) return null;
@@ -276,26 +269,21 @@
     const fs = map.queryRenderedFeatures([[pt.x - r, pt.y - r], [pt.x + r, pt.y + r]], { layers });
     if (!fs.length) return null;
     const rank = (f) => PRIORITY.indexOf(f.layer.id);
-    const dist = (f) => {
-      if (f.geometry.type !== 'Point') return 0;
-      const p = map.project(f.geometry.coordinates);
-      return Math.hypot(p.x - pt.x, p.y - pt.y);
-    };
+    const dist = (f) => { const p = map.project(f.geometry.coordinates); return Math.hypot(p.x - pt.x, p.y - pt.y); };
     fs.sort((a, b) => rank(a) - rank(b) || dist(a) - dist(b));
     return fs[0];
   }
 
   function onMapClick(e) {
-    if (S.mode === 'analyse' && (S.tab === 'verfuegbarkeit' || S.tab === 'dichte')) {
-      pointQuery(e.lngLat.lng, e.lngLat.lat); applyVisibility(); return;
-    }
+    if (anyPointTab()) { pointQuery(e.lngLat.lng, e.lngLat.lat); return; }
     const f = pick(e.point);
     if (!f) { closeDetail(); return; }
     const p = f.properties;
     switch (f.layer.id) {
-      case 'stations-c': S.mode === 'verlauf' ? showTlStation(p.i) : showStation(p.uid); break;
-      case 'free-dots': S.mode === 'verlauf' ? showTlBike(p.i) : showBike(p.id); break;
+      case 'stations-c': S.k.isLive ? showStation(p.uid) : showTlStation(p.i); break;
+      case 'free-dots': S.k.isLive ? showBike(p.id) : showTlBike(p.i); break;
       case 'idle-dots': showBike(p.id); break;
+      case 'trips-dot': showTrip(p); break;
       case 'trail-pts': showTrail(); break;
       case 'netc': showNetCell(p, f.geometry.coordinates); break;
       case 'an-st': stationQuery(p.uid); break;
@@ -304,44 +292,41 @@
   }
 
   function select(geom) { setData('sel', geom ? { type: 'Feature', geometry: geom, properties: {} } : EMPTY); }
-
   function flyTo(lnglat, zoom) {
-    const pad = sheetVisibleHeight();
     map.easeTo({ center: lnglat, zoom: Math.max(map.getZoom(), zoom ?? 14.5), duration: REDUCED ? 0 : 600,
-      padding: isDesktop() ? { left: 420, top: 0, right: 0, bottom: 0 } : { bottom: pad, top: 0, left: 0, right: 0 } });
+      padding: isDesktop() ? { left: 420, top: 0, right: 0, bottom: 0 } : { bottom: sheetVisibleHeight(), top: 0, left: 0, right: 0 } });
   }
 
-  // ---------------------------------------------------------------- sheet
+  // ================================================================ sheet (phones)
   const panel = $('#panel');
   let sheetState = 'peek';
   function peekHeight() {
-    const sec = $(`.mode[data-mode="${S.mode}"]`);
-    const peek = sec ? $('.peek', sec) : null;
-    return $('#grab').offsetHeight + $('#head').offsetHeight + (peek ? peek.offsetHeight : 0) + 6;
+    const peek = $(`.mode[data-mode="${S.mode}"] .peek`);
+    return $('#grab').offsetHeight + $('#head').offsetHeight + (peek ? peek.offsetHeight : 0) + 4;
   }
   function sheetY(state) {
     const H = panel.offsetHeight;
     if (state === 'full') return 0;
-    if (state === 'half') return Math.max(0, H - Math.max(window.innerHeight * 0.55, peekHeight() + 120));
+    if (state === 'half') return Math.max(0, H - Math.max(window.innerHeight * 0.62, peekHeight() + 160));
     return Math.max(0, H - peekHeight());
   }
   function setSheet(state) {
     if (isDesktop()) return;
     sheetState = state;
+    panel.dataset.sheet = state;
     panel.style.setProperty('--sheet-y', `${sheetY(state)}px`);
+    $$('.more-toggle').forEach((b) => b.setAttribute('aria-expanded', String(state !== 'peek')));
   }
   function sheetVisibleHeight() {
     if (isDesktop()) return 0;
-    const y = parseFloat(getComputedStyle(panel).getPropertyValue('--sheet-y')) || 0;
+    const y = parseFloat(panel.style.getPropertyValue('--sheet-y')) || 0;
     return panel.offsetHeight - y;
   }
   function initSheet() {
     let startY = 0, startOff = 0, dragging = false, moved = false, lastY = 0, lastT = 0, vel = 0;
-    const handle = (e) => !e.target.closest('button, input, a');
     const down = (e) => {
-      if (isDesktop() || !handle(e)) return;
-      dragging = true; moved = false;
-      startY = lastY = e.clientY; lastT = performance.now();
+      if (isDesktop() || e.target.closest('button, input, a, select')) return;
+      dragging = true; moved = false; startY = lastY = e.clientY; lastT = performance.now();
       startOff = sheetY(sheetState);
       panel.classList.add('dragging');
       e.currentTarget.setPointerCapture(e.pointerId);
@@ -351,213 +336,95 @@
       const dy = e.clientY - startY;
       if (Math.abs(dy) > 4) moved = true;
       const t = performance.now();
-      vel = (e.clientY - lastY) / Math.max(1, t - lastT);
-      lastY = e.clientY; lastT = t;
-      const y = Math.min(Math.max(0, startOff + dy), sheetY('peek'));
-      panel.style.setProperty('--sheet-y', `${y}px`);
+      vel = (e.clientY - lastY) / Math.max(1, t - lastT); lastY = e.clientY; lastT = t;
+      panel.style.setProperty('--sheet-y', `${Math.min(Math.max(0, startOff + dy), sheetY('peek'))}px`);
     };
     const up = () => {
       if (!dragging) return;
-      dragging = false;
-      panel.classList.remove('dragging');
+      dragging = false; panel.classList.remove('dragging');
       if (!moved) { setSheet(sheetState === 'peek' ? 'half' : 'peek'); return; }
       const y = parseFloat(panel.style.getPropertyValue('--sheet-y'));
       const states = ['full', 'half', 'peek'].map((st) => ({ st, y: sheetY(st) }));
       let best = states.reduce((a, b) => (Math.abs(b.y - y) < Math.abs(a.y - y) ? b : a));
       if (Math.abs(vel) > 0.45) {
-        // a flick goes to the next stop in the flick direction
-        const cand = vel > 0 ? states.filter((x) => x.y > y + 1).sort((a, b) => a.y - b.y)[0]
-          : states.filter((x) => x.y < y - 1).sort((a, b) => b.y - a.y)[0];
+        const cand = vel > 0 ? states.filter((x) => x.y > y + 1).sort((a, b) => a.y - b.y)[0] : states.filter((x) => x.y < y - 1).sort((a, b) => b.y - a.y)[0];
         if (cand) best = cand;
       }
-      best = best.st;
-      setSheet(best);
+      setSheet(best.st);
     };
     for (const el of [$('#grab'), $('#head')]) {
-      el.addEventListener('pointerdown', down);
-      el.addEventListener('pointermove', move);
-      el.addEventListener('pointerup', up);
-      el.addEventListener('pointercancel', up);
+      el.addEventListener('pointerdown', down); el.addEventListener('pointermove', move);
+      el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up);
     }
     addEventListener('resize', () => setSheet(sheetState));
     document.fonts?.ready.then(() => setSheet(sheetState));
     setSheet('peek');
   }
+  const refreshSheet = () => requestAnimationFrame(() => setSheet(sheetState));
 
-  // ---------------------------------------------------------------- modes
+  // ================================================================ modes
   function setMode(mode, opts = {}) {
-    if (S.mode === 'verlauf' && mode !== 'verlauf') stopPlay();
-    if (S.mode === 'analyse' && mode !== 'analyse') stopWindowPlay();
+    if (S.mode === 'karte' && mode !== 'karte') stopPlay();
+    if (S.mode === 'analyse' && mode !== 'analyse') { stopWindowPlay(); stopParticles(); }
     S.mode = mode;
     for (const b of $$('.modes button')) b.setAttribute('aria-selected', String(b.dataset.mode === mode));
     for (const s of $$('section.mode')) s.hidden = s.dataset.mode !== mode;
     closeDetail(true);
     updateHash();
     applyVisibility();
-    if (mode === 'live') renderLive();
-    if (mode === 'verlauf') enterTimeline(opts);
+    if (mode === 'karte') { renderKarte(true); if (opts.trail) showTrailFor(opts.trail); }
     if (mode === 'analyse') enterAnalysis();
     updateStatus();
     requestAnimationFrame(() => setSheet(opts.sheet || (sheetState === 'full' ? 'half' : sheetState)));
   }
   function updateHash() {
-    const h = S.mode === 'analyse' ? `#analyse/${S.tab}` : `#${S.mode}`;
+    const h = S.mode === 'analyse' ? `#analyse/${S.tab}` : '#karte';
     if (location.hash !== h) history.replaceState(null, '', h);
   }
   function readHash() {
     const [m, t] = location.hash.replace('#', '').split('/');
-    if (['live', 'verlauf', 'analyse'].includes(m)) S.mode = m;
-    if (t && $(`#aTabs [data-tab="${t}"]`)) S.tab = t;
+    S.mode = m === 'analyse' ? 'analyse' : 'karte';
+    const tab = ({ verfuegbarkeit: 'erreichbarkeit' })[t] || t;
+    if (tab && $(`#aTabs [data-tab="${tab}"]`)) S.tab = tab;
   }
 
   function updateStatus() {
     const el = $('#status'), txt = $('#statusText');
     el.classList.remove('stale', 'past');
-    if (S.mode === 'verlauf' && S.tl) {
+    if (S.mode === 'karte' && !S.k.isLive && S.tl) {
       el.classList.add('past');
-      txt.textContent = 'Verlauf der letzten Tage';
+      txt.textContent = 'Rückblick, nicht live';
       return;
     }
     if (!S.live) { txt.textContent = 'lädt …'; return; }
-    const t = Date.parse(S.live.meta.ts) / 1000;
-    const old = now() - t > 40 * 60;
+    const old = now() - S.live.t > 40 * 60;
     if (old) el.classList.add('stale');
-    txt.textContent = `Stand ${fTime.format(new Date(t * 1000))} Uhr, vor ${ago(t)}${old ? ' (veraltet)' : ''}`;
+    txt.textContent = `${old ? 'Veraltet' : 'Stand'} ${fTime.format(new Date(S.live.t * 1000))}, vor ${fmtDur(Math.max(0, now() - S.live.t))}`;
   }
 
-  // ---------------------------------------------------------------- live
+  // ================================================================ live data
   async function loadLive(silent) {
-    try {
-      S.live = await getJSON('latest.json');
-    } catch (err) {
+    try { S.live = await getJSON('latest.json'); } catch {
       if (!silent) toast('Live-Daten konnten nicht geladen werden. Neuer Versuch in einer Minute.');
       setTimeout(() => loadLive(true), 60000);
       return;
     }
-    S.live.byId = new Map(S.live.bikes.map((b) => [b.bike, b]));
-    S.live.stById = new Map(S.live.stations.map((s, i) => [String(s.uid), { ...s, i }]));
-    S.live.docked = new Map();
-    for (const b of S.live.bikes) if (b.kind === 'station') {
+    const L = S.live;
+    L.t = Date.parse(L.meta.ts) / 1000;
+    L.byId = new Map(L.bikes.map((b) => [b.bike, b]));
+    L.stById = new Map(L.stations.map((s, i) => [String(s.uid), { ...s, i }]));
+    L.docked = new Map();
+    for (const b of L.bikes) if (b.kind === 'station') {
       const k = String(b.place_uid);
-      if (!S.live.docked.has(k)) S.live.docked.set(k, []);
-      S.live.docked.get(k).push(b);
+      if (!L.docked.has(k)) L.docked.set(k, []);
+      L.docked.get(k).push(b);
     }
-    if (S.mode === 'live') renderLive();
+    if (S.mode === 'karte' && S.k.isLive) renderKarte(true);
     if (S.mode === 'analyse' && S.tab === 'standzeit') renderIdle();
     updateStatus();
   }
 
-  function renderLive() {
-    if (!S.live || !styleReady) return;
-    const L = S.live;
-    setData('bikes', { type: 'FeatureCollection', features: L.bikes.map((b) => ({
-      type: 'Feature', geometry: { type: 'Point', coordinates: [b.lng, b.lat] },
-      properties: { k: b.kind === 'station' ? 1 : 0, id: b.bike } })) });
-    setData('stations', { type: 'FeatureCollection', features: L.stations.map((s) => ({
-      type: 'Feature', geometry: { type: 'Point', coordinates: [s.lng, s.lat] },
-      properties: { n: (L.docked.get(String(s.uid)) || []).length, uid: String(s.uid) } })) });
-    const c = L.meta.counts;
-    $('#sTotal').textContent = nf.format(c.total);
-    $('#sStation').textContent = nf.format(c.station);
-    $('#sFree').textContent = nf.format(c.free + c.other);
-    if (S.me) renderNear();
-  }
-
-  const LOCKS = { frame_lock: 'Rahmenschloss', frame_lock_with_bt_capabilities: 'Bluetooth', rack_adapter: 'Stationsadapter', cable_lock: 'Kabelschloss' };
-  function sinceText(b) {
-    if (!b.since) return null;
-    const d = fmtDur(Math.max(0, now() - b.since));
-    return b.since_censored ? `mind. ${d} (seit Aufzeichnungsbeginn)` : d;
-  }
-
-  function showBike(id) {
-    const b = S.live?.byId.get(String(id));
-    if (!b) { toast(`Rad ${id} ist gerade nicht im Feed, wahrscheinlich unterwegs.`); return; }
-    const st = b.kind === 'station' ? S.live.stById.get(String(b.place_uid)) : null;
-    const rows = [
-      st && ['Station', esc(st.name)],
-      ['Steht hier seit', sinceText(b) || '–'],
-      b.battery != null && ['Akku', `${b.battery} %`],
-      ['Schloss', esc((b.lock_types || '').split(',').filter(Boolean).map((x) => LOCKS[x] || x).join(', ') || '–')],
-      b.bike_type != null && ['Typ-Code', b.bike_type],
-    ].filter(Boolean);
-    const route = `https://www.google.com/maps/dir/?api=1&destination=${b.lat},${b.lng}&travelmode=walking`;
-    const target = S.mode === 'analyse' ? '#detailA' : '#detail';
-    showDetail(target, `
-      <p class="kicker"><span class="dot" style="background:${st ? C.station : C.free}"></span>${st ? 'An einer Station' : 'Frei abgestellt'}${S.me ? `, ${fmtDist(hav(S.me[1], S.me[0], b.lat, b.lng))} entfernt` : ''}</p>
-      <h3>Rad ${esc(b.bike)}</h3>
-      <dl class="kv">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
-      <div class="actions">
-        <a class="btn sm" href="${route}" target="_blank" rel="noopener">Route hierhin</a>
-        <button class="btn sm ghost" data-act="trail" data-id="${esc(b.bike)}">Weg der letzten Tage</button>
-      </div>`);
-    select({ type: 'Point', coordinates: [b.lng, b.lat] });
-    flyTo([b.lng, b.lat]);
-  }
-
-  function showStation(uid) {
-    const st = S.live?.stById.get(String(uid));
-    if (!st) return;
-    const docked = S.live.docked.get(String(uid)) || [];
-    const rows = [
-      ['Räder jetzt', `${docked.length}`],
-      st.bike_racks ? ['Stellplätze', `${st.bike_racks}${st.free_racks != null ? `, ${st.free_racks} frei` : ''}`] : null,
-      st.terminal_type ? ['Terminal', esc(st.terminal_type)] : null,
-    ].filter(Boolean);
-    showDetail('#detail', `
-      <p class="kicker"><span class="dot" style="background:${C.station}"></span>Station${st.number ? ` ${st.number}` : ''}</p>
-      <h3>${esc(st.name)}</h3>
-      <dl class="kv">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
-      ${docked.length ? `<div class="bikelist">${docked.slice(0, 60).map((b) => `<button data-act="bike" data-id="${esc(b.bike)}">${esc(b.bike)}</button>`).join('')}</div>` : ''}
-      <div id="stHist" class="block" style="padding-bottom:0"><p class="hint">Typischer Füllstand wird geladen …</p></div>
-      <div class="actions"><a class="btn sm" href="https://www.google.com/maps/dir/?api=1&destination=${st.lat},${st.lng}&travelmode=walking" target="_blank" rel="noopener">Route hierhin</a></div>`);
-    select({ type: 'Point', coordinates: [st.lng, st.lat] });
-    flyTo([st.lng, st.lat]);
-    stationQuery(String(uid), true, '#stHist').catch(() => { const el = $('#stHist'); if (el) el.innerHTML = ''; });
-  }
-
-  // ---------------------------------------------------------------- near me
-  function locate(fromButton) {
-    if (!navigator.geolocation) { toast('Standort wird von diesem Browser nicht unterstützt.'); return; }
-    $('#btnLocate').classList.add('on');
-    navigator.geolocation.getCurrentPosition((pos) => {
-      S.me = [pos.coords.longitude, pos.coords.latitude];
-      setData('me', { type: 'Feature', geometry: { type: 'Point', coordinates: S.me }, properties: {} });
-      flyTo(S.me, 15.2);
-      if (S.mode === 'live') { renderNear(); if (!fromButton) setSheet('half'); }
-    }, (err) => {
-      $('#btnLocate').classList.remove('on');
-      toast(err.code === 1 ? 'Standortfreigabe abgelehnt. Du kannst sie in den Browser-Einstellungen erlauben.' : 'Standort konnte nicht bestimmt werden.');
-    }, { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 });
-  }
-
-  function renderNear() {
-    if (!S.me || !S.live) return;
-    const [lng, lat] = S.me;
-    const items = [];
-    for (const b of S.live.bikes) if (b.kind !== 'station') items.push({ d: hav(lat, lng, b.lat, b.lng), b });
-    for (const [uid, list] of S.live.docked) {
-      const st = S.live.stById.get(uid);
-      if (st && list.length) items.push({ d: hav(lat, lng, st.lat, st.lng), st, n: list.length });
-    }
-    items.sort((a, b) => a.d - b.d);
-    const within = items.filter((x) => x.d <= 400).reduce((s, x) => s + (x.n || 1), 0);
-    const top = items.slice(0, 6);
-    $('#near').innerHTML = `
-      <p style="margin:0 0 6px"><b>${within}</b> ${within === 1 ? 'Rad' : 'Räder'} im Umkreis von 400 m.</p>
-      <p class="hint" id="nearChance" style="margin:0 0 8px"></p>
-      <ul class="rows">${top.map((x) => x.b ? `
-        <li><button class="rowbtn" data-act="bike" data-id="${esc(x.b.bike)}"><span class="dot" style="background:${C.free}"></span>
-          <span class="main"><b>Rad ${esc(x.b.bike)}</b><small>frei abgestellt</small></span>
-          <span class="val">${fmtDist(x.d)}<small>~${Math.max(1, Math.round(x.d / 75))} Min. zu Fuß</small></span></button></li>` : `
-        <li><button class="rowbtn" data-act="station" data-id="${esc(x.st.uid)}"><span class="dot" style="background:${C.station}"></span>
-          <span class="main"><b>${esc(x.st.name)}</b><small>${x.n} ${x.n === 1 ? 'Rad' : 'Räder'} an der Station</small></span>
-          <span class="val">${fmtDist(x.d)}<small>~${Math.max(1, Math.round(x.d / 75))} Min. zu Fuß</small></span></button></li>`).join('')}</ul>
-      <button class="btn sm ghost" id="btnNear2" type="button" style="margin-top:8px">Standort aktualisieren</button>`;
-    $('#nearChance').innerHTML = '<button class="btn sm ghost" data-act="pointme" type="button">Wie oft steht hier ein Rad?</button>';
-  }
-
-  // ---------------------------------------------------------------- history index + worker
+  // ================================================================ history index + worker
   let tlIndex = null, tlIndexAt = 0;
   async function ensureIndex() {
     if (tlIndex && now() - tlIndexAt < 600) return tlIndex;
@@ -581,51 +448,74 @@
     return new Promise((res, rej) => { const id = ++rid; pending.set(id, { res, rej }); worker.postMessage({ id, op, args }); });
   }
 
-  // ---------------------------------------------------------------- timeline
+  // ================================================================ KARTE: one timeline, live at the right end
   const KEY = 12;
+  let tlLoading = null;
   async function ensureTimeline() {
     const idx = await ensureIndex();
-    const end = S.tlEnd && S.tlEnd <= lastDate() ? S.tlEnd : lastDate();
-    const nDays = Math.ceil(S.span / 24) + (S.span <= 24 ? 1 : 0);
+    const end = S.k.end && S.k.end <= lastDate() ? S.k.end : lastDate();
+    const nDays = Math.ceil(S.k.span / 24) + 1;
     const dates = idx.map((d) => d.date).filter((d) => d <= end && d > addDays(end, -nDays - 1));
-    const key = dates.join(',');
+    const key = `${dates.join(',')}|${S.k.span}`;
     if (S.tl && S.tl.key === key && now() - S.tl.loaded < 600) return S.tl;
-    const files = await Promise.all(dates.map((d) => getJSON(`tl/${d}.json`)));
-    // merge days into one global-index timeline; a day starts with a full snapshot
-    const bIdx = new Map(), bikes = [], sIdx = new Map(), stations = [];
-    const t = [], frames = [], gone = [], reset = [];
-    for (const d of files) {
-      const bm = d.bikes.map((id) => { let g = bIdx.get(id); if (g == null) { g = bikes.length; bIdx.set(id, g); bikes.push(id); } return g; });
-      const sm = d.stations.map((s) => { let g = sIdx.get(s[0]); if (g == null) { g = stations.length; sIdx.set(s[0], g); stations.push(s); } return g; });
-      d.t.forEach((tt, i) => {
-        const f = d.frames[i], a = new Int32Array(f.length);
-        for (let k = 0; k < f.length; k += 4) { a[k] = bm[f[k]]; a[k + 1] = f[k + 1]; a[k + 2] = f[k + 2]; a[k + 3] = f[k + 3] >= 0 ? sm[f[k + 3]] : -1; }
-        t.push(tt); frames.push(a); gone.push(d.gone[i].map((b) => bm[b])); reset.push(i === 0);
-      });
-    }
-    const T = { key, dates, t, frames, gone, reset, bikes, stations, bikeIndex: bIdx, N: bikes.length,
-      lat0: files[0]?.lat0 ?? 50, lng0: files[0]?.lng0 ?? 6, scale: files[0]?.scale ?? 1e5, loaded: now(), inuse: null };
-    const st = () => ({ p: new Uint8Array(T.N), la: new Int32Array(T.N), lo: new Int32Array(T.N), pl: new Int32Array(T.N).fill(-1) });
-    T.apply = (s, i) => {
-      if (T.reset[i]) s.p.fill(0);
-      const f = T.frames[i];
-      for (let k = 0; k < f.length; k += 4) { const b = f[k]; s.p[b] = 1; s.la[b] = f[k + 1]; s.lo[b] = f[k + 2]; s.pl[b] = f[k + 3]; }
-      for (const b of T.gone[i]) s.p[b] = 0;
-    };
-    const s = st();
-    T.keys = [];
-    for (let i = 0; i < t.length; i++) { T.apply(s, i); if (i % KEY === 0) T.keys.push({ p: s.p.slice(), la: s.la.slice(), lo: s.lo.slice(), pl: s.pl.slice() }); }
-    T.cur = { ...st(), i: -1 };
-    S.tl = T;
-    S.frame = -1;
-    // bikes in use for the sparkline, computed in the worker
-    rpc('inuseSeries', { dates, P: tripParams() }).then((r) => {
+    if (tlLoading?.key === key) return tlLoading.p;
+    const p = (async () => {
+      const files = await Promise.all(dates.map((d) => getJSON(`tl/${d}.json`)));
+      const bIdx = new Map(), bikes = [], sIdx = new Map(), stations = [];
+      const t = [], frames = [], gone = [], reset = [];
+      for (const d of files) {
+        const bm = d.bikes.map((id) => { let g = bIdx.get(id); if (g == null) { g = bikes.length; bIdx.set(id, g); bikes.push(id); } return g; });
+        const sm = d.stations.map((s) => { let g = sIdx.get(s[0]); if (g == null) { g = stations.length; sIdx.set(s[0], g); stations.push(s); } return g; });
+        d.t.forEach((tt, i) => {
+          const f = d.frames[i], a = new Int32Array(f.length);
+          for (let k = 0; k < f.length; k += 4) { a[k] = bm[f[k]]; a[k + 1] = f[k + 1]; a[k + 2] = f[k + 2]; a[k + 3] = f[k + 3] >= 0 ? sm[f[k + 3]] : -1; }
+          t.push(tt); frames.push(a); gone.push(d.gone[i].map((b) => bm[b])); reset.push(i === 0);
+        });
+      }
+      const tEnd = t[t.length - 1];
+      const i0 = Math.max(0, t.findIndex((x) => x >= tEnd - S.k.span * 3600));
+      const T = { key, dates, t, frames, gone, reset, bikes, stations, bikeIndex: bIdx, N: bikes.length, i0,
+        lat0: files[0]?.lat0 ?? 50, lng0: files[0]?.lng0 ?? 6, scale: files[0]?.scale ?? 1e5, loaded: now(), inuse: null };
+      const st = () => ({ p: new Uint8Array(T.N), la: new Int32Array(T.N), lo: new Int32Array(T.N), pl: new Int32Array(T.N).fill(-1) });
+      T.apply = (s, i) => {
+        if (T.reset[i]) s.p.fill(0);
+        const f = T.frames[i];
+        for (let k = 0; k < f.length; k += 4) { const b = f[k]; s.p[b] = 1; s.la[b] = f[k + 1]; s.lo[b] = f[k + 2]; s.pl[b] = f[k + 3]; }
+        for (const b of T.gone[i]) s.p[b] = 0;
+      };
+      const s = st();
+      T.keys = [];
+      for (let i = 0; i < t.length; i++) { T.apply(s, i); if (i % KEY === 0) T.keys.push({ p: s.p.slice(), la: s.la.slice(), lo: s.lo.slice(), pl: s.pl.slice() }); }
+      T.cur = { ...st(), i: -1 };
+      return T;
+    })();
+    tlLoading = { key, p };
+    try {
+      const T = await p;
+      S.tl = T;
+      loadTrips(T);
+      return T;
+    } finally { tlLoading = null; }
+  }
+
+  // inferred trips for the loaded days (worker): moving dots + "unterwegs"
+  async function loadTrips(T) {
+    try {
+      const r = await rpc('tripsList', { dates: T.dates, P: tripParams() });
       if (S.tl !== T) return;
-      const m = new Map(r.t.map((x, k) => [x, r.inuse[k]]));
+      const tr = r.trips, n = tr.length / 8, list = [];
+      for (let i = 0; i < n; i++) {
+        const o = i * 8;
+        list.push({ s: tr[o], e: tr[o + 1], a: [tr[o + 3], tr[o + 2]], b: [tr[o + 5], tr[o + 4]], d: tr[o + 6], short: !!tr[o + 7] });
+      }
+      list.sort((x, y) => x.s - y.s);
+      S.trips = list;
+      const m = new Map(r.pollT.map((x, k) => [x, r.inuse[k]]));
       T.inuse = T.t.map((x) => m.get(x) ?? 0);
-      if (S.mode === 'verlauf') { setupScrubber(); renderFrame(); }
-    }).catch(() => {});
-    return T;
+      S.k.liveInuse = r.inuse[r.inuse.length - 1] ?? null;
+      setupScrubber();
+      renderKarte(true);
+    } catch (err) { console.warn('trips', err); }
   }
 
   function seek(i) {
@@ -642,129 +532,251 @@
     cur.i = i;
   }
 
-  let tlRaf = 0;
-  function renderFrame() {
-    if (tlRaf) return;
-    tlRaf = requestAnimationFrame(() => {
-      tlRaf = 0;
-      const T = S.tl;
-      if (!T || !T.t.length || S.frame < 0) return;
-      seek(S.frame);
-      const cur = T.cur, sc = T.scale;
-      const bikes = [], counts = new Int32Array(T.stations.length);
-      let free = 0, docked = 0;
-      for (let b = 0; b < T.N; b++) {
-        if (!cur.p[b]) continue;
-        const lat = T.lat0 + cur.la[b] / sc, lng = T.lng0 + cur.lo[b] / sc;
-        const k = cur.pl[b] >= 0 ? 1 : 0;
-        if (k) { counts[cur.pl[b]]++; docked++; } else free++;
-        bikes.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] }, properties: { k, i: b } });
+  let lastRendered = -2;
+  function renderKarte(force) {
+    if (!styleReady || S.mode !== 'karte') return;
+    const T = S.tl, k = S.k;
+    if (k.isLive || !T) {
+      if (!S.live) return;
+      if (force || lastRendered !== -1) { renderLiveBikes(); lastRendered = -1; }
+      k.clock = S.live.t;
+      setClock(S.live.t, true);
+    } else {
+      if (force || lastRendered !== k.frame) { renderFrameBikes(k.frame); lastRendered = k.frame; }
+      if (!k.playing) k.clock = T.t[k.frame];
+      setClock(k.clock, false);
+    }
+    renderTrips(k.clock);
+  }
+
+  function renderLiveBikes() {
+    const L = S.live;
+    setData('bikes', { type: 'FeatureCollection', features: L.bikes.map((b) => ({
+      type: 'Feature', geometry: { type: 'Point', coordinates: [b.lng, b.lat] }, properties: { k: b.kind === 'station' ? 1 : 0, id: b.bike } })) });
+    setData('stations', { type: 'FeatureCollection', features: L.stations.map((s) => ({
+      type: 'Feature', geometry: { type: 'Point', coordinates: [s.lng, s.lat] }, properties: { n: (L.docked.get(String(s.uid)) || []).length, uid: String(s.uid) } })) });
+    const c = L.meta.counts;
+    setStats(c.total, c.station, c.free + c.other, S.k.liveInuse);
+  }
+
+  function renderFrameBikes(i) {
+    const T = S.tl;
+    seek(i);
+    const cur = T.cur, sc = T.scale;
+    const bikes = [], counts = new Int32Array(T.stations.length);
+    let free = 0, docked = 0;
+    for (let b = 0; b < T.N; b++) {
+      if (!cur.p[b]) continue;
+      const lat = T.lat0 + cur.la[b] / sc, lng = T.lng0 + cur.lo[b] / sc;
+      const kk = cur.pl[b] >= 0 ? 1 : 0;
+      if (kk) { counts[cur.pl[b]]++; docked++; } else free++;
+      bikes.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] }, properties: { k: kk, i: b } });
+    }
+    setData('bikes', { type: 'FeatureCollection', features: bikes });
+    setData('stations', { type: 'FeatureCollection', features: T.stations.map((s, j) => ({
+      type: 'Feature', geometry: { type: 'Point', coordinates: [s[3], s[2]] }, properties: { n: counts[j], i: j } })) });
+    setStats(bikes.length, docked, free, T.inuse ? T.inuse[i] : null);
+  }
+
+  function setStats(total, st, fr, use) {
+    $('#sTotal').textContent = nf.format(total);
+    $('#sStation').textContent = nf.format(st);
+    $('#sFree').textContent = nf.format(fr);
+    $('#sUse').textContent = use == null ? '–' : nf.format(use);
+  }
+
+  function setClock(t, live) {
+    $('#tlTime').textContent = fTime.format(new Date(t * 1000));
+    $('#tlDate').textContent = live ? `Live, ${fDate.format(new Date(t * 1000))}` : fDate.format(new Date(t * 1000));
+    const lb = $('#tlLive');
+    lb.setAttribute('aria-pressed', String(live));
+    lb.title = live ? 'Du siehst den aktuellen Stand' : 'Zum aktuellen Stand springen';
+    $('#tlRange').setAttribute('aria-valuetext', live ? 'Live' : fmtWhen(t));
+  }
+
+  // ---- trips: moving dot plus fading trail along a curved line
+  function arcPoint(a, b, u) {
+    const [x0, y0] = a, [x1, y1] = b;
+    const mx = (x0 + x1) / 2, my = (y0 + y1) / 2, dx = x1 - x0, dy = (y1 - y0) * 1.58;
+    const cx = mx - dy * 0.16, cy = my + (dx * 0.16) / 1.58, v = 1 - u;
+    return [v * v * x0 + 2 * v * u * cx + u * u * x1, v * v * y0 + 2 * v * u * cy + u * u * y1];
+  }
+  function arcPath(a, b, u1 = 1, n = 16) { const p = []; for (let k = 0; k <= n; k++) p.push(arcPoint(a, b, (k / n) * u1)); return p; }
+
+  function renderTrips(clock) {
+    if (!styleReady) return;
+    if (!S.trips || !S.layers.trips || S.mode !== 'karte') { setData('trips', EMPTY); setData('tripdots', EMPTY); return; }
+    const lines = [], dots = [];
+    const FADE = 25 * 60;
+    for (const tr of S.trips) {
+      if (tr.s > clock) break;
+      if (tr.e < clock - FADE) continue;
+      const dur = Math.max(60, tr.e - tr.s);
+      if (clock <= tr.e) {
+        const u = Math.min(1, Math.max(0.03, (clock - tr.s) / dur));
+        lines.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: arcPath(tr.a, tr.b, u, 12) }, properties: { o: 1 } });
+        dots.push({ type: 'Feature', geometry: { type: 'Point', coordinates: arcPoint(tr.a, tr.b, u) },
+          properties: { s: tr.s, e: tr.e, d: tr.d, ax: tr.a[0], ay: tr.a[1], bx: tr.b[0], by: tr.b[1], short: tr.short ? 1 : 0 } });
+      } else {
+        lines.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: arcPath(tr.a, tr.b, 1, 12) }, properties: { o: 0.2 + 0.55 * (1 - (clock - tr.e) / FADE) } });
       }
-      setData('bikes', { type: 'FeatureCollection', features: bikes });
-      setData('stations', { type: 'FeatureCollection', features: T.stations.map((s, i) => ({
-        type: 'Feature', geometry: { type: 'Point', coordinates: [s[3], s[2]] }, properties: { n: counts[i], i } })) });
-      const t = T.t[S.frame];
-      $('#tlTime').textContent = fTime.format(new Date(t * 1000));
-      $('#tlDate').textContent = fDate.format(new Date(t * 1000));
-      $('#tTotal').textContent = nf.format(bikes.length);
-      $('#tStation').textContent = nf.format(docked);
-      $('#tFree').textContent = nf.format(free);
-      $('#tUse').textContent = T.inuse ? nf.format(T.inuse[S.frame] ?? 0) : '…';
-      $('#tlRange').setAttribute('aria-valuetext', `${fDate.format(new Date(t * 1000))} ${fTime.format(new Date(t * 1000))}`);
-    });
+    }
+    setData('trips', { type: 'FeatureCollection', features: lines });
+    setData('tripdots', { type: 'FeatureCollection', features: dots });
   }
 
-  function spanStart() {
-    const T = S.tl, tEnd = T.t[T.t.length - 1];
-    return Math.max(0, T.t.findIndex((t) => t >= tEnd - S.span * 3600));
+  function showTrip(p) {
+    showDetail('#detail', `
+      <p class="kicker"><span class="dot" style="background:${C.trip}"></span>Geschätzte Fahrt</p>
+      <h3>${fmtDist(p.d)} Luftlinie</h3>
+      <dl class="kv"><dt>Von</dt><dd>${esc(nearestStationName(p.ax, p.ay))}</dd><dt>Nach</dt><dd>${esc(nearestStationName(p.bx, p.by))}</dd>
+        <dt>Zeit</dt><dd>${+p.short ? `zwischen ${fTime.format(new Date(p.s * 1000))} und ${fTime.format(new Date(p.e * 1000))} Uhr` : `etwa ${fTime.format(new Date(p.s * 1000))} bis ${fTime.format(new Date(p.e * 1000))} Uhr`}</dd></dl>
+      <p class="hint">Start und Ziel sind bekannt, der Weg dazwischen nicht. Die Linie verbindet nur die beiden Punkte.</p>`);
   }
 
+  // ---- scrubber (the last position is "Live")
   function setupScrubber() {
     const T = S.tl, r = $('#tlRange');
-    const i0 = spanStart(), i1 = T.t.length - 1;
-    r.min = i0; r.max = i1;
-    if (S.frame < i0 || S.frame > i1) S.frame = i1;
-    r.value = S.frame;
+    if (!T || !T.t.length) return;
+    const i0 = T.i0, i1 = T.t.length - 1, liveIdx = i1 + 1;
+    r.disabled = false;
+    r.min = i0; r.max = liveIdx;
+    if (S.k.isLive) r.value = liveIdx;
+    else { S.k.frame = Math.min(Math.max(S.k.frame, i0), i1); r.value = S.k.frame; }
     const svg = $('#tlSpark');
-    const n = i1 - i0 + 1;
-    const vals = (T.inuse || T.t.map(() => 0)).slice(i0, i1 + 1);
-    const max = Math.max(5, ...vals);
-    const ts = T.t[i0], te = T.t[i1], span = Math.max(1, te - ts);
+    const ts = T.t[i0], te = Math.max(S.live?.t || 0, T.t[i1]), span = Math.max(1, te - ts);
     const X = (t) => ((t - ts) / span) * 1000;
-    const Y = (v) => 50 - (v / max) * 44;
+    const vals = T.inuse ? T.inuse.slice(i0, i1 + 1) : null;
     let d = '';
-    for (let k = 0; k < n; k++) d += `${k ? 'L' : 'M'}${X(T.t[i0 + k]).toFixed(1)},${Y(vals[k]).toFixed(1)}`;
-    svg.setAttribute('viewBox', '0 0 1000 52');
+    if (vals) {
+      const max = Math.max(5, ...vals);
+      for (let k = 0; k < vals.length; k++) d += `${k ? 'L' : 'M'}${X(T.t[i0 + k]).toFixed(1)},${(50 - (vals[k] / max) * 44).toFixed(1)}`;
+    }
     const days = [], ticks = [];
-    for (let t = ts - (ts % 3600); t <= te; t += 3600) {
+    const sp = S.k.span;
+    for (let t = ts - (ts % 3600) + 3600; t <= te; t += 3600) {
       const h = localHour(t);
-      if (h === 0 && t > ts) days.push(t);
-      if (S.span <= 24 ? h % 6 === 0 : (S.span <= 72 ? h === 12 || h === 0 : h === 12)) ticks.push(t);
+      if (h === 0) days.push(t);
+      if (sp <= 6 ? true : sp <= 24 ? h % 6 === 0 : sp <= 72 ? h === 0 || h === 12 : h === 12) ticks.push(t);
     }
+    svg.setAttribute('viewBox', '0 0 1000 52');
     svg.innerHTML = `${days.map((t) => `<line class="day" x1="${X(t)}" x2="${X(t)}" y1="0" y2="52"/>`).join('')}
-      ${n > 1 && T.inuse ? `<path class="area" d="${d}L1000,52L0,52Z"/><path class="ln" d="${d}"/>` : ''}`;
-    const every = S.span > 200 ? 2 : 1;
-    $('#tlTicks').innerHTML = ticks.filter((_, k) => k % every === 0).map((t) => {
-      const lab = S.span <= 24 ? `${localHour(t)} Uhr` : (localHour(t) === 0 ? fDM.format(new Date(t * 1000)) : fDay.format(new Date(t * 1000)));
+      ${d ? `<path class="area" d="${d}L${X(T.t[i1])},52L${X(T.t[i0])},52Z"/><path class="ln" d="${d}"/>` : ''}`;
+    $('#tlTicks').innerHTML = ticks.map((t) => {
+      const lab = sp <= 24 ? `${localHour(t)} Uhr` : localHour(t) === 0 ? fDM.format(new Date(t * 1000)) : fDay.format(new Date(t * 1000));
       const x = X(t) / 10;
-      return x > 4 && x < 96 ? `<span style="left:${x}%">${lab}</span>` : '';
-    }).join('');
-    renderFrame();
+      return x > 6 && x < 86 ? `<span style="left:${x}%">${lab}</span>` : '';
+    }).join('') + '<span class="end">jetzt</span>';
   }
 
-  async function enterTimeline(opts = {}) {
-    $('#tlTime').textContent = '--:--';
-    try {
-      await ensureTimeline();
-    } catch (err) {
-      console.warn(err);
-      toast('Verlauf noch nicht verfügbar. Er entsteht mit den nächsten Abfragen.');
-      return;
-    }
+  function goLive() {
+    stopPlay();
+    S.k.isLive = true;
+    if (S.tl) $('#tlRange').value = S.tl.t.length;
+    closeDetail(true);
+    renderKarte(true); updateStatus();
+  }
+
+  function setFrame(i) {
     const T = S.tl;
-    if (!T.t.length) { toast('Noch keine Verlaufsdaten.'); return; }
-    const end = $('#tlEnd');
-    end.min = firstDate(); end.max = lastDate(); end.value = S.tlEnd || lastDate();
-    if (opts.frameAt) S.frame = nearestFrame(opts.frameAt);
-    else if (S.frame < 0) S.frame = T.t.length - 1;
-    setupScrubber();
-    applyVisibility();
-    updateStatus();
-    if (opts.trail) showTrailFor(opts.trail);
+    if (!T) return;
+    if (i >= T.t.length) { goLive(); return; }
+    S.k.isLive = false; S.k.frame = i; S.k.clock = T.t[i];
+    renderKarte(); updateStatus();
   }
 
-  const nearestFrame = (t) => {
-    const T = S.tl; let best = 0;
-    for (let i = 0; i < T.t.length; i++) if (Math.abs(T.t[i] - t) < Math.abs(T.t[best] - t)) best = i;
-    return best;
-  };
-
-  let playTimer = 0;
-  function stopPlay() { S.playing = false; clearInterval(playTimer); $('#tlPlay').classList.remove('on'); $('#tlPlay').setAttribute('aria-label', 'Abspielen'); }
+  // continuous playback: the clock runs smoothly, bikes update at each poll,
+  // trip dots glide in between
+  let playRaf = 0, playLast = 0;
+  const RATE = { 1: 900, 2: 1800, 4: 3600 }; // simulated seconds per real second
+  function stopPlay() {
+    S.k.playing = false; cancelAnimationFrame(playRaf);
+    $('#tlPlay').classList.remove('on'); $('#tlPlay').setAttribute('aria-label', 'Abspielen');
+  }
   function startPlay() {
-    if (!S.tl) return;
-    const r = $('#tlRange');
-    if (S.frame >= +r.max) S.frame = +r.min;
-    S.playing = true;
+    const T = S.tl;
+    if (!T) { toast('Der Verlauf lädt noch.'); return; }
+    if (S.k.isLive || S.k.frame >= T.t.length - 1) { S.k.isLive = false; S.k.frame = T.i0; }
+    S.k.clock = T.t[S.k.frame];
+    S.k.playing = true; playLast = performance.now();
     $('#tlPlay').classList.add('on'); $('#tlPlay').setAttribute('aria-label', 'Pause');
-    clearInterval(playTimer);
-    playTimer = setInterval(() => {
-      if (S.frame >= +r.max) { stopPlay(); return; }
-      S.frame += 1; r.value = S.frame; renderFrame();
-    }, 250 / S.speed);
+    updateStatus();
+    const step = (ts) => {
+      if (!S.k.playing) return;
+      const dt = Math.min(0.1, (ts - playLast) / 1000); playLast = ts;
+      S.k.clock += dt * RATE[S.k.speed];
+      let f = S.k.frame;
+      while (f + 1 < T.t.length && T.t[f + 1] <= S.k.clock) f++;
+      if (f !== S.k.frame) { S.k.frame = f; $('#tlRange').value = f; }
+      if (S.k.clock >= T.t[T.t.length - 1]) { goLive(); return; }
+      renderKarte();
+      playRaf = requestAnimationFrame(step);
+    };
+    playRaf = requestAnimationFrame(step);
+  }
+
+  // ---- details in the map view
+  const LOCKS = { frame_lock: 'Rahmenschloss', frame_lock_with_bt_capabilities: 'Bluetooth', rack_adapter: 'Stationsadapter', cable_lock: 'Kabelschloss' };
+  function sinceText(b) {
+    if (!b.since) return null;
+    const d = fmtDur(Math.max(0, now() - b.since));
+    return b.since_censored ? `mind. ${d} (seit Aufzeichnungsbeginn)` : d;
+  }
+
+  function showBike(id) {
+    const b = S.live?.byId.get(String(id));
+    if (!b) { toast(`Rad ${id} ist gerade nicht im Feed, wahrscheinlich unterwegs.`); return; }
+    const st = b.kind === 'station' ? S.live.stById.get(String(b.place_uid)) : null;
+    const rows = [
+      st && ['Station', esc(st.name)],
+      ['Unbewegt seit', sinceText(b) || '–'],
+      b.battery != null && ['Akku', `${b.battery} %`],
+      ['Schloss', esc((b.lock_types || '').split(',').filter(Boolean).map((x) => LOCKS[x] || x).join(', ') || '–')],
+      b.bike_type != null && ['Typ-Code', b.bike_type],
+    ].filter(Boolean);
+    const route = `https://www.google.com/maps/dir/?api=1&destination=${b.lat},${b.lng}&travelmode=walking`;
+    showDetail(S.mode === 'analyse' ? '#detailA' : '#detail', `
+      <p class="kicker"><span class="dot" style="background:${st ? C.station : C.free}"></span>${st ? 'An einer Station' : 'Frei abgestellt'}${S.me ? `, ${fmtDist(hav(S.me[1], S.me[0], b.lat, b.lng))} entfernt` : ''}</p>
+      <h3>Rad ${esc(b.bike)}</h3>
+      <dl class="kv">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
+      <div class="actions">
+        <a class="btn sm" href="${route}" target="_blank" rel="noopener">Route hierhin</a>
+        <button class="btn sm ghost" data-act="trail" data-id="${esc(b.bike)}">Weg anzeigen</button>
+      </div>`);
+    select({ type: 'Point', coordinates: [b.lng, b.lat] });
+    flyTo([b.lng, b.lat]);
+  }
+
+  function showStation(uid) {
+    const st = S.live?.stById.get(String(uid));
+    if (!st) return;
+    const docked = S.live.docked.get(String(uid)) || [];
+    const rows = [
+      ['Räder jetzt', `${docked.length}`],
+      st.bike_racks ? ['Stellplätze', `${st.bike_racks}${st.free_racks != null ? `, ${st.free_racks} frei` : ''}`] : null,
+    ].filter(Boolean);
+    showDetail('#detail', `
+      <p class="kicker"><span class="dot" style="background:${C.station}"></span>Station${st.number ? ` ${st.number}` : ''}</p>
+      <h3>${esc(st.name)}</h3>
+      <dl class="kv">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
+      ${docked.length ? `<div class="bikelist">${docked.slice(0, 60).map((b) => `<button data-act="bike" data-id="${esc(b.bike)}">${esc(b.bike)}</button>`).join('')}</div>` : ''}
+      <div id="stHist" class="sub"><span class="busy">Typischer Füllstand wird berechnet</span></div>
+      <div class="actions"><a class="btn sm" href="https://www.google.com/maps/dir/?api=1&destination=${st.lat},${st.lng}&travelmode=walking" target="_blank" rel="noopener">Route hierhin</a></div>`);
+    select({ type: 'Point', coordinates: [st.lng, st.lat] });
+    flyTo([st.lng, st.lat]);
+    stationQuery(String(uid), true, '#stHist').catch(() => { const el = $('#stHist'); if (el) el.innerHTML = ''; });
   }
 
   function showTlBike(i) {
-    const T = S.tl, id = T.bikes[i];
-    const cur = T.cur;
+    const T = S.tl, id = T.bikes[i], cur = T.cur;
     const lat = T.lat0 + cur.la[i] / T.scale, lng = T.lng0 + cur.lo[i] / T.scale;
     const st = cur.pl[i] >= 0 ? T.stations[cur.pl[i]] : null;
-    showDetail('#detailTl', `
-      <p class="kicker"><span class="dot" style="background:${st ? C.station : C.free}"></span>${st ? 'An einer Station' : 'Frei abgestellt'}, ${fDate.format(new Date(T.t[S.frame] * 1000))} ${fTime.format(new Date(T.t[S.frame] * 1000))}</p>
+    showDetail('#detail', `
+      <p class="kicker"><span class="dot" style="background:${st ? C.station : C.free}"></span>${st ? 'An einer Station' : 'Frei abgestellt'}, ${fmtWhen(T.t[S.k.frame])}</p>
       <h3>Rad ${esc(id)}</h3>
       ${st ? `<dl class="kv"><dt>Station</dt><dd>${esc(st[1])}</dd></dl>` : ''}
       <div class="actions"><button class="btn sm" data-act="trail" data-id="${esc(id)}">Weg anzeigen</button>
-      ${S.live?.byId.has(id) ? `<button class="btn sm ghost" data-act="livebike" data-id="${esc(id)}">Jetzt live</button>` : ''}</div>`);
+      ${S.live?.byId.has(id) ? `<button class="btn sm ghost" data-act="livebike" data-id="${esc(id)}">Wo ist es jetzt?</button>` : ''}</div>`);
     select({ type: 'Point', coordinates: [lng, lat] });
   }
 
@@ -772,8 +784,8 @@
     const T = S.tl, s = T.stations[i];
     const list = [];
     for (let b = 0; b < T.N; b++) if (T.cur.p[b] && T.cur.pl[b] === i) list.push(T.bikes[b]);
-    showDetail('#detailTl', `
-      <p class="kicker"><span class="dot" style="background:${C.station}"></span>Station, ${fDate.format(new Date(T.t[S.frame] * 1000))} ${fTime.format(new Date(T.t[S.frame] * 1000))}</p>
+    showDetail('#detail', `
+      <p class="kicker"><span class="dot" style="background:${C.station}"></span>Station, ${fmtWhen(T.t[S.k.frame])}</p>
       <h3>${esc(s[1])}</h3>
       <dl class="kv"><dt>Räder</dt><dd>${list.length}</dd></dl>
       ${list.length ? `<div class="bikelist">${list.slice(0, 60).map((b) => `<button data-act="tlbike" data-id="${esc(b)}">${esc(b)}</button>`).join('')}</div>` : ''}`);
@@ -781,10 +793,11 @@
   }
 
   async function showTrailFor(id) {
-    if (S.mode !== 'verlauf') { setMode('verlauf', { trail: id }); return; }
-    const T = await ensureTimeline();
+    if (S.mode !== 'karte') { setMode('karte', { trail: id }); return; }
+    let T;
+    try { T = await ensureTimeline(); } catch { toast('Der Verlauf ist noch nicht verfügbar.'); return; }
     const i = T.bikeIndex.get(String(id));
-    if (i == null) { toast(`Rad ${id} kommt im gewählten Zeitraum nicht vor.`); return; }
+    if (i == null) { toast(`Rad ${id} kommt im Zeitraum der Zeitleiste nicht vor.`); return; }
     const stays = [];
     let present = false, last = null;
     for (let f = 0; f < T.t.length; f++) {
@@ -796,10 +809,10 @@
         if (last && present && hav(last.lat, last.lng, lat, lng) < 60 && last.pl === pl) last.t1 = T.t[f];
         else { last = { lat, lng, pl, t0: T.t[f], t1: T.t[f] }; stays.push(last); }
         present = true;
-      } else if (T.reset[f] || T.gone[f].includes(i)) { present = false; }
+      } else if (T.reset[f] || T.gone[f].includes(i)) present = false;
       else if (present && last) last.t1 = T.t[f];
     }
-    if (!stays.length) { toast(`Rad ${id} kommt im gewählten Zeitraum nicht vor.`); return; }
+    if (!stays.length) { toast(`Rad ${id} kommt im Zeitraum der Zeitleiste nicht vor.`); return; }
     S.trail = { id, stays };
     setData('trail', { type: 'FeatureCollection', features: [
       { type: 'Feature', geometry: { type: 'LineString', coordinates: stays.map((s) => [s.lng, s.lat]) }, properties: {} },
@@ -813,36 +826,76 @@
   }
 
   function showTrail() {
-    const tr = S.trail; if (!tr) return;
-    const T = S.tl;
+    const tr = S.trail, T = S.tl; if (!tr || !T) return;
     const name = (s) => (s.pl >= 0 ? esc(T.stations[s.pl][1]) : 'frei abgestellt');
     const rows = tr.stays.slice().reverse().slice(0, 60).map((s) => `
       <li><button class="rowbtn" data-act="frame" data-t="${s.t0}"><span class="dot" style="background:${s.pl >= 0 ? C.station : C.free}"></span>
         <span class="main"><b>${name(s)}</b><small>${fDate.format(new Date(s.t0 * 1000))} ${fTime.format(new Date(s.t0 * 1000))} bis ${s.t1 === s.t0 ? '–' : fTime.format(new Date(s.t1 * 1000))}</small></span>
         <span class="val">${fmtDur(Math.max(600, s.t1 - s.t0))}</span></button></li>`).join('');
-    showDetail('#detailTl', `
-      <p class="kicker">Weg im gewählten Zeitraum</p>
+    showDetail('#detail', `
+      <p class="kicker">Weg im Zeitraum der Zeitleiste</p>
       <h3>Rad ${esc(tr.id)}</h3>
-      <p class="hint" style="margin-top:0">${tr.stays.length} Standorte. Antippen springt zum Zeitpunkt.</p>
+      <p class="hint">${tr.stays.length} Standorte. Antippen springt zu diesem Zeitpunkt.</p>
       <ul class="rows">${rows}</ul>
       <div class="actions"><button class="btn sm ghost" data-act="cleartrail">Weg ausblenden</button></div>`, { keepSel: true });
   }
 
-  // ---------------------------------------------------------------- analysis filters
+  // ---- near me
+  function locate(fromButton) {
+    if (!navigator.geolocation) { toast('Standort wird von diesem Browser nicht unterstützt.'); return; }
+    $('#btnLocate').classList.add('on');
+    navigator.geolocation.getCurrentPosition((pos) => {
+      S.me = [pos.coords.longitude, pos.coords.latitude];
+      setData('me', { type: 'Feature', geometry: { type: 'Point', coordinates: S.me }, properties: {} });
+      flyTo(S.me, 15.2);
+      if (S.mode === 'karte') { renderNear(); if (!fromButton) setSheet('half'); }
+    }, (err) => {
+      $('#btnLocate').classList.remove('on');
+      toast(err.code === 1 ? 'Standortfreigabe abgelehnt. Du kannst sie in den Browser-Einstellungen erlauben.' : 'Standort konnte nicht bestimmt werden.');
+    }, { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 });
+  }
+
+  function renderNear() {
+    if (!S.me || !S.live) return;
+    const [lng, lat] = S.me;
+    const items = [];
+    for (const b of S.live.bikes) if (b.kind !== 'station') items.push({ d: hav(lat, lng, b.lat, b.lng), b });
+    for (const [uid, list] of S.live.docked) {
+      const st = S.live.stById.get(uid);
+      if (st && list.length) items.push({ d: hav(lat, lng, st.lat, st.lng), st, n: list.length });
+    }
+    items.sort((a, b) => a.d - b.d);
+    const within = items.filter((x) => x.d <= 400).reduce((s, x) => s + (x.n || 1), 0);
+    const walk = (d) => `~${Math.max(1, Math.round(d / 75))} Min. zu Fuß`;
+    $('#near').innerHTML = `
+      <p class="near-sum"><b>${within}</b> ${within === 1 ? 'Rad' : 'Räder'} im Umkreis von 400 m</p>
+      <ul class="rows">${items.slice(0, 6).map((x) => x.b ? `
+        <li><button class="rowbtn" data-act="bike" data-id="${esc(x.b.bike)}"><span class="dot" style="background:${C.free}"></span>
+          <span class="main"><b>Rad ${esc(x.b.bike)}</b><small>frei abgestellt</small></span>
+          <span class="val">${fmtDist(x.d)}<small>${walk(x.d)}</small></span></button></li>` : `
+        <li><button class="rowbtn" data-act="station" data-id="${esc(x.st.uid)}"><span class="dot" style="background:${C.station}"></span>
+          <span class="main"><b>${esc(x.st.name)}</b><small>${x.n} ${x.n === 1 ? 'Rad' : 'Räder'} an der Station</small></span>
+          <span class="val">${fmtDist(x.d)}<small>${walk(x.d)}</small></span></button></li>`).join('')}</ul>
+      <div class="actions"><button class="btn sm" data-act="pointme" type="button">Wie weit ist es hier normalerweise?</button>
+      <button class="btn sm ghost" id="btnNear2" type="button">Standort aktualisieren</button></div>`;
+  }
+
+  // ================================================================ ANALYSE: filters
   const WD_NAMES = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
+  const FILTER_KEY = 'kvb-filter-v3';
   const DEFAULT_F = () => {
     const h = localHour(now());
-    return { range: 14, from: null, to: null, wd: isWeekend(now()) ? [0, 0, 0, 0, 0, 1, 1] : [1, 1, 1, 1, 1, 0, 0],
-      a: h * 4, b: ((h + 1) % 24) * 4 || 96, kind: 'all', R: 400, res: 100, smooth: 150,
-      minGone: 100, jump: 300, maxDurH: 4, cell: 1000, top: 40, min: 2, k: 0, idleMin: 0 };
+    return { range: 14, from: null, to: null, wd: [1, 1, 1, 1, 1, 1, 1], a: h * 4, b: ((h + 1) % 24) * 4 || 96,
+      kind: 'all', reachMetric: 'median', R: 200, res: 50, smooth: 75,
+      minGone: 100, jump: 300, maxDurH: 4, cell: 250, top: 150, min: 1,
+      stMetric: 'avg', k: 0, idleMin: 0 };
   };
   function loadFilter() {
-    try { const s = JSON.parse(localStorage.getItem('kvb-filter') || 'null'); if (s && Array.isArray(s.wd)) return { ...DEFAULT_F(), ...s }; } catch { /* ignore */ }
+    try { const s = JSON.parse(localStorage.getItem(FILTER_KEY) || 'null'); if (s && Array.isArray(s.wd)) return { ...DEFAULT_F(), ...s }; } catch { /* ignore */ }
     return DEFAULT_F();
   }
-  function saveFilter() { try { localStorage.setItem('kvb-filter', JSON.stringify(S.f)); } catch { /* ignore */ } }
+  function saveFilter() { try { localStorage.setItem(FILTER_KEY, JSON.stringify(S.f)); } catch { /* ignore */ } }
 
-  const minToStr = (m) => `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
   const winMin = () => ({ t0: S.f.a * 15, t1: (S.f.b * 15) % 1440 });
   const winLabel = () => {
     const { a, b } = S.f;
@@ -850,13 +903,12 @@
     return `${minToStr(a * 15)}–${b === 96 ? '24:00' : minToStr(b * 15)}`;
   };
   const wdLabel = (wd = S.f.wd) => {
-    const on = wd.map(Boolean);
-    const key = on.map((x) => (x ? 1 : 0)).join('');
+    const key = wd.map((x) => (x ? 1 : 0)).join('');
     if (key === '1111111') return 'alle Tage';
     if (key === '1111100') return 'Mo–Fr';
     if (key === '0000011') return 'Sa/So';
     if (key === '0000000') return 'keine Tage';
-    return WD_NAMES.filter((_, i) => on[i]).join(', ');
+    return WD_NAMES.filter((_, i) => wd[i]).join(', ');
   };
   function filterDates() {
     const idx = tlIndex || [];
@@ -874,10 +926,46 @@
     return { from, to, wd: S.f.wd.map(Boolean), t0, t1, kind: S.f.kind };
   }
   const tripParams = () => ({ minGone: S.f?.minGone ?? 100, jump: S.f?.jump ?? 300, maxDur: (S.f?.maxDurH ?? 4) * 3600 });
-  const rangeLabel = () => { const { from, to } = filterDates(); return from ? `${fmtD(from)}–${fmtD(to)}` : ''; };
-  const PARAM_LABEL = {
-    verfuegbarkeit: () => `Umkreis ${S.f.R} m`, dichte: () => `Glättung ${S.f.smooth} m`, nutzung: () => `ab ${S.f.minGone} m`,
-    stroeme: () => `Raster ${fmtDist(S.f.cell)}`, stationen: () => `leer = höchstens ${S.f.k}`, standzeit: () => (S.f.idleMin ? `ab ${S.f.idleMin} Tagen` : 'alle Räder'),
+  const rangeLabel = () => { const { from, to } = filterDates(); return from ? (from === to ? fmtD(from) : `${fmtD(from)}–${fmtD(to)}`) : ''; };
+
+  // what each tab answers, and how it is computed
+  const TABS = {
+    erreichbarkeit: {
+      lead: 'Wie weit läufst du zum nächsten Rad?',
+      how: `<p>Für jede Abfrage im Filter wird für jedes 50-m-Feld die Luftlinie zum nächsten abgestellten Rad bestimmt.</p>
+        <ul><li><b>Laufweg</b>: der typische Wert (Median). In der Hälfte der Abfragen stand ein Rad näher, in der anderen weiter weg.</li>
+        <li><b>Chance im Umkreis</b>: in wie viel Prozent der Abfragen mindestens ein Rad innerhalb des gewählten Umkreises stand.</li></ul>
+        <p>Tippen auf die Karte rechnet exakt für diesen Ort, mit Tagesverlauf. Bei vielen Abfragen wird eine gleichmäßig verteilte Stichprobe von 150 genutzt.</p>`,
+    },
+    dichte: {
+      lead: 'Wo stehen im Schnitt die meisten Räder?',
+      how: `<p>Pro Abfrage werden die abgestellten Räder je Feld gezählt, über alle Abfragen im Filter gemittelt und leicht geglättet. Einheit: Räder pro Hektar (100 × 100 m).</p>
+        <p><b>Unterschied zur Erreichbarkeit:</b> Dichte zählt Räder, Erreichbarkeit misst den Weg zum nächsten. Ein einzelnes Rad an einer Ecke macht die Erreichbarkeit gut, die Dichte bleibt gering. Große Stationen und Hotspots fallen nur bei der Dichte auf.</p>`,
+    },
+    stroeme: {
+      lead: 'Wohin fahren die Räder?',
+      how: `<p>Eine Fahrt wird geschätzt, wenn ein Rad aus dem Feed verschwindet und an anderer Stelle wieder auftaucht, oder zwischen zwei Abfragen weit springt. Zugeordnet wird sie ihrer Startzeit.</p>
+        <ul><li><b>Linien</b>: die häufigsten Verbindungen zwischen Start- und Zielbereich. Die Punkte wandern in Fahrtrichtung, dickere Linie bedeutet mehr Fahrten.</li>
+        <li><b>Kreise</b>: Bilanz je Bereich. Rot heißt, hier beginnen mehr Fahrten als enden (Räder fließen ab), blau das Gegenteil. Größe = Anzahl.</li></ul>
+        <p>Mit ▶ wandert das Zeitfenster durch den Tag. Einzelne Fahrten in Echtzeit zeigt die Ansicht „Karte“ beim Abspielen.</p>`,
+    },
+    nutzung: {
+      lead: 'Wie viel wird gefahren, wann und wie weit?',
+      how: `<p>Grundlage sind dieselben geschätzten Fahrten wie bei „Ströme“. „Unterwegs“ zählt zu jeder Abfrage die Fahrten, die gerade laufen.</p>
+        <p>Fahrten, die zwischen zwei Abfragen beginnen und enden, haben keine messbare Dauer. Lange Abwesenheiten zählen als Werkstatt oder Umverteilung. Umverteilung per Transporter lässt sich nicht sicher von Fahrten trennen.</p>`,
+    },
+    stationen: {
+      lead: 'Wie voll sind die Stationen typischerweise?',
+      how: `<p>Pro Abfrage werden die Räder an jeder Station gezählt.</p>
+        <ul><li><b>Ø Räder</b>: Mittelwert über alle Abfragen im Filter.</li>
+        <li><b>Chance leer</b>: Anteil der Abfragen, in denen höchstens so viele Räder dort standen wie eingestellt (Standard: keins).</li></ul>
+        <p>Station antippen zeigt den Verlauf über den Tag.</p>`,
+    },
+    standzeit: {
+      lead: 'Wie lange stehen Räder unbewegt am selben Ort?',
+      how: `<p>Ein Rad gilt als bewegt, wenn es aus dem Feed verschwindet (gefahren oder abgeholt) oder sich mehr als 100 m verschiebt. Gezeigt wird die Zeit seit der letzten Bewegung, Stand jetzt.</p>
+        <p>Genauigkeit: so fein wie der Abfrageabstand (etwa 13 Minuten). Standzeiten, die vor Beginn der Aufzeichnung anfingen, sind Mindestwerte.</p>`,
+    },
   };
 
   function syncFilterUI() {
@@ -885,60 +973,68 @@
     $('#wA').value = a; $('#wB').value = b;
     $('#wLabel').textContent = winLabel();
     $('#wDays').textContent = wdLabel();
-    // fill between handles; wraps when start is after end
-    const fill = $('#wFill'), pa = (a / 96) * 100, pb = (b / 96) * 100;
-    const inset = 'calc(12px + (100% - 24px) * ';
-    if (a <= b) { fill.style.left = `${inset}${pa / 100})`; fill.style.width = `calc((100% - 24px) * ${(pb - pa) / 100})`; fill.style.background = ''; }
+    const fill = $('#wFill'), pa = a / 96, pb = b / 96;
+    if (a <= b) { fill.style.left = `calc(12px + (100% - 24px) * ${pa})`; fill.style.width = `calc((100% - 24px) * ${pb - pa})`; fill.style.background = ''; }
     else {
       fill.style.left = '12px'; fill.style.width = 'calc(100% - 24px)';
-      fill.style.background = `linear-gradient(90deg, var(--ink) ${pb}%, transparent ${pb}%, transparent ${pa}%, var(--ink) ${pa}%)`;
+      fill.style.background = `linear-gradient(90deg, var(--ink) ${pb * 100}%, transparent ${pb * 100}%, transparent ${pa * 100}%, var(--ink) ${pa * 100}%)`;
     }
-    const isIdle = S.tab === 'standzeit';
-    $('#timeBar').hidden = isIdle;
-    $('#fSumText').textContent = isIdle ? PARAM_LABEL.standzeit() : `${wdLabel()}, ${rangeLabel()}, ${PARAM_LABEL[S.tab]()}`;
+    const idle = S.tab === 'standzeit';
+    $('#timeBar').hidden = idle;
+    $('#aLead').textContent = TABS[S.tab].lead;
+    $('#fSumText').textContent = idle ? 'Filter und Erklärung' : `Filter: ${wdLabel()}, ${rangeLabel()}`;
     $('#wA').setAttribute('aria-valuetext', minToStr(a * 15));
     $('#wB').setAttribute('aria-valuetext', b === 96 ? '24:00' : minToStr(b * 15));
   }
+
+  const FMT = {
+    smooth: (v) => (+v ? `${v} m` : 'aus'), minGone: (v) => `${v} m`, jump: (v) => `${v} m`,
+    maxDurH: (v) => `${nf1.format(v)} Std.`, cell: (v) => fmtDist(+v), top: (v) => `${v}`, min: (v) => `${v}`,
+    k: (v) => (+v ? `höchstens ${v} ${+v === 1 ? 'Rad' : 'Räder'}` : 'kein Rad'),
+  };
+  const IDLE_STEPS = [0, 900, 1800, 3600, 7200, 4 * 3600, 8 * 3600, 86400, 2 * 86400, 3 * 86400, 7 * 86400];
+  const idleLabel = (s) => (s ? `mind. ${fmtDur(s)}` : 'alle');
 
   function slider(id, label, min, max, step, val, fmt) {
     return `<div class="row"><h3><label for="${id}">${label}</label><output id="${id}-o">${fmt(val)}</output></h3>
       <input class="slider" type="range" id="${id}" min="${min}" max="${max}" step="${step}" value="${val}" data-param="${id.replace('p-', '')}"></div>`;
   }
-  function kindSeg() {
-    return `<div class="row"><h3>Welche Räder</h3><div class="seg" role="radiogroup" data-seg="kind">
-      ${[['all', 'Alle'], ['free', 'Frei abgestellt'], ['station', 'An Stationen']].map(([v, l]) => `<button role="radio" data-v="${v}" aria-checked="${S.f.kind === v}">${l}</button>`).join('')}</div></div>`;
+  function seg(key, label, opts) {
+    return `<div class="row"><h3>${label}</h3><div class="seg" role="radiogroup" data-seg="${key}">
+      ${opts.map(([v, l]) => `<button role="radio" data-v="${v}" aria-checked="${String(S.f[key]) === String(v)}">${l}</button>`).join('')}</div></div>`;
   }
-  const FMT = {
-    R: (v) => `${v} m`, res: (v) => `${v} m`, smooth: (v) => (+v ? `${v} m` : 'aus'), minGone: (v) => `${v} m`, jump: (v) => `${v} m`,
-    maxDurH: (v) => `${nf1.format(v)} h`, cell: (v) => fmtDist(+v), top: (v) => `${v}`, min: (v) => `${v}`, k: (v) => (+v ? `höchstens ${v} ${+v === 1 ? 'Rad' : 'Räder'}` : 'kein Rad'),
-    idleMin: (v) => (+v ? `${v} ${+v === 1 ? 'Tag' : 'Tage'}` : 'alle'),
-  };
+  const kindSeg = () => seg('kind', 'Welche Räder', [['all', 'Alle'], ['free', 'Frei'], ['station', 'An Station']]);
+  const resSeg = () => seg('res', 'Kartenauflösung', [[50, '50 m'], [100, '100 m'], [200, '200 m']]);
+  const R_OPTS = [50, 100, 150, 200, 300, 400, 500, 750, 1000];
+
   function tabParams() {
     const f = S.f;
     switch (S.tab) {
-      case 'verfuegbarkeit': return slider('p-R', 'Umkreis', 50, 1000, 50, f.R, FMT.R) + kindSeg()
-        + slider('p-res', 'Kartenauflösung', 50, 300, 50, f.res, FMT.res);
-      case 'dichte': return slider('p-smooth', 'Glättung', 0, 400, 25, f.smooth, FMT.smooth) + kindSeg()
-        + slider('p-res', 'Kartenauflösung', 50, 300, 50, f.res, FMT.res);
+      case 'erreichbarkeit':
+        return seg('reachMetric', 'Darstellung', [['median', 'Laufweg'], ['prob', 'Chance im Umkreis']])
+          + (f.reachMetric === 'prob' ? `<div class="row"><h3>Umkreis</h3><div class="chips tight" data-seg="R">${R_OPTS.map((r) => `<button class="chip${f.R === r ? ' on' : ''}" data-v="${r}" aria-pressed="${f.R === r}">${r} m</button>`).join('')}</div></div>` : '')
+          + kindSeg() + resSeg();
+      case 'dichte': return slider('p-smooth', 'Glättung', 0, 300, 25, f.smooth, FMT.smooth) + kindSeg() + resSeg();
       case 'nutzung': return tripSliders();
-      case 'stroeme': return slider('p-cell', 'Rastergröße für Start und Ziel', 250, 3000, 250, f.cell, FMT.cell)
-        + slider('p-top', 'Anzahl Verbindungen', 5, 150, 5, f.top, FMT.top) + slider('p-min', 'Mindestens Fahrten je Verbindung', 1, 30, 1, f.min, FMT.min) + tripSliders();
-      case 'stationen': return slider('p-k', 'Als „leer“ gilt', 0, 5, 1, f.k, FMT.k);
-      case 'standzeit': return slider('p-idleMin', 'Mindestens unbewegt seit', 0, 14, 1, f.idleMin, FMT.idleMin) + kindSeg();
+      case 'stroeme': return slider('p-cell', 'Größe der Start- und Zielbereiche', 100, 2000, 50, f.cell, FMT.cell)
+        + slider('p-top', 'Höchstens so viele Verbindungen', 10, 400, 10, f.top, FMT.top) + slider('p-min', 'Mindestens Fahrten je Verbindung', 1, 20, 1, f.min, FMT.min) + tripSliders();
+      case 'stationen': return seg('stMetric', 'Farbe zeigt', [['avg', 'Ø Räder'], ['empty', 'Chance leer']]) + slider('p-k', 'Als „leer“ gilt', 0, 5, 1, f.k, FMT.k);
+      case 'standzeit': return `<div class="row"><h3><label for="p-idle">Nur Räder, die unbewegt sind seit</label><output id="p-idle-o">${idleLabel(f.idleMin)}</output></h3>
+        <input class="slider" type="range" id="p-idle" min="0" max="${IDLE_STEPS.length - 1}" step="1" value="${Math.max(0, IDLE_STEPS.indexOf(f.idleMin))}"></div>` + kindSeg();
       default: return '';
     }
   }
   function tripSliders() {
     const f = S.f;
-    return `<p class="hint" style="margin:12px 0 0">So werden Fahrten aus dem Feed geschätzt:</p>`
+    return `<h3 class="group">Wann zählt etwas als Fahrt?</h3>`
       + slider('p-minGone', 'Rad verschwindet und taucht mindestens so weit entfernt wieder auf', 50, 1000, 50, f.minGone, FMT.minGone)
       + slider('p-jump', 'oder springt zwischen zwei Abfragen weiter als', 100, 2000, 100, f.jump, FMT.jump)
-      + slider('p-maxDurH', 'Länger weg zählt als Werkstatt oder Umverteilung', 0.5, 12, 0.5, f.maxDurH, FMT.maxDurH);
+      + slider('p-maxDurH', 'Länger weg = Werkstatt oder Umverteilung', 0.5, 12, 0.5, f.maxDurH, FMT.maxDurH);
   }
 
   function filterBlock() {
     const { from, to } = filterDates();
-    const min = tlIndex.length ? firstDate() : '', max = tlIndex.length ? lastDate() : '';
+    const min = tlIndex?.length ? firstDate() : '', max = tlIndex?.length ? lastDate() : '';
     const common = S.tab === 'standzeit' ? '' : `
       <div class="row"><h3>Zeitraum</h3>
         <div class="seg" role="radiogroup" data-seg="range">
@@ -950,49 +1046,50 @@
         </div></div>
       <div class="row"><h3>Wochentage</h3>
         <div class="wdays">${WD_NAMES.map((n, i) => `<button type="button" data-wd="${i}" aria-pressed="${!!S.f.wd[i]}">${n}</button>`).join('')}</div>
-        <div class="quick"><button data-wdp="1111100">Mo–Fr</button><button data-wdp="0000011">Sa/So</button><button data-wdp="1111111">Alle</button></div></div>
-      <div class="row"><h3>Uhrzeit</h3><p class="hint" style="margin:0 0 4px">Mit den beiden Reglern oben. Liegt der Beginn hinter dem Ende, geht das Fenster über Mitternacht.</p>
-        <div class="quick">${[['ganzer Tag', 0, 96], ['Morgen 6–10', 24, 40], ['Mittag 10–16', 40, 64], ['Abend 16–20', 64, 80], ['Nacht 20–6', 80, 24]]
-          .map(([l, a, b]) => `<button data-win="${a},${b}">${l}</button>`).join('')}</div></div>`;
-    return `<div class="block filters" id="filters">${common}${tabParams()}</div>`;
+        <div class="quick"><button data-wdp="1111111">Alle</button><button data-wdp="1111100">Mo–Fr</button><button data-wdp="0000011">Sa/So</button></div></div>
+      <div class="row"><h3>Uhrzeit</h3>
+        <div class="quick">${[['Ganzer Tag', 0, 96], ['Morgens 6–10', 24, 40], ['Tagsüber 10–16', 40, 64], ['Abends 16–20', 64, 80], ['Nachts 20–6', 80, 24]]
+          .map(([l, a, b]) => `<button data-win="${a},${b}">${l}</button>`).join('')}</div>
+        <p class="hint">Oder mit den beiden Reglern oben. Liegt der Beginn hinter dem Ende, reicht das Fenster über Mitternacht.</p></div>`;
+    return `<details class="explain"><summary>So wird gerechnet</summary>${TABS[S.tab].how}</details>
+      <div class="block filters" id="filters"><h2>Filter</h2>${common}${tabParams()}</div>`;
   }
 
-  // ---------------------------------------------------------------- analysis
-  const RAMP = {
-    avail: (DARK ? ['#1b2a42', '#184f95', '#3987e5', '#86b6ef', '#e6f0fd'] : ['#cde2fb', '#86b6ef', '#3987e5', '#1c5cab', '#0d366b']),
-    dens: R.heat.slice(1),
-  };
-  const toStops = (cols, a0, a1) => cols.map((c, k) => {
-    const n = parseInt(c.slice(1), 16), f = k / (cols.length - 1);
-    return [f, (n >> 16) & 255, (n >> 8) & 255, n & 255, a0 + (a1 - a0) * f];
-  });
-
+  // ================================================================ ANALYSE: compute + render
   let anSeq = 0, anTimer = 0;
   async function enterAnalysis() {
     for (const b of $$('#aTabs button')) b.setAttribute('aria-selected', String(b.dataset.tab === S.tab));
+    stopParticles();
     applyVisibility();
     $('#aLegend').innerHTML = '';
     try { await ensureIndex(); } catch {
-      $('#aMore').innerHTML = '<div class="basis warn">Noch keine Verlaufsdaten vorhanden. Sie entstehen automatisch mit den nächsten Abfragen.</div>';
+      syncFilterUI();
+      $('#aMore').innerHTML = '<div class="empty">Noch keine Verlaufsdaten vorhanden. Sie entstehen automatisch mit den nächsten Abfragen.</div>';
       return;
     }
     if (S.mode !== 'analyse') return;
     syncFilterUI();
-    renderAnalysisBody();
-    compute();
-  }
-
-  function renderAnalysisBody() {
-    $('#aMore').innerHTML = `${filterBlock()}<div class="block" id="aOut"><span class="busy">rechnet …</span></div>`;
+    $('#aMore').innerHTML = `${filterBlock()}<div class="block" id="aOut"><span class="busy">rechnet</span></div>`;
     bindFilterInputs();
-    requestAnimationFrame(() => setSheet(sheetState));
+    refreshSheet();
+    compute();
   }
 
   function scheduleCompute(delay = 120) {
     clearTimeout(anTimer);
     anTimer = setTimeout(compute, delay);
-    const l = $('#aLegend .top .busy');
-    if (!l && $('#aLegend .top')) $('#aLegend .top').insertAdjacentHTML('beforeend', '<span class="busy">rechnet …</span>');
+    const top = $('#aLegend .top');
+    if (top && !$('.busy', top)) top.insertAdjacentHTML('beforeend', '<span class="busy">rechnet</span>');
+  }
+
+  function coverageText() {
+    if (!tlIndex?.length) return '';
+    const days = tlIndex.slice(-5).map((d) => `${fDate.format(new Date(d.t0 * 1000))} ${fTime.format(new Date(d.t0 * 1000))}–${fTime.format(new Date(d.t1 * 1000))} Uhr`);
+    return `${tlIndex.length > 5 ? '… ' : ''}${days.join(', ')}`;
+  }
+  function emptyState(what) {
+    return `<div class="empty"><b>${what}</b><p>Daten gibt es bisher für: ${esc(coverageText())}.</p>
+      <div class="actions"><button class="btn sm" data-act="widen" type="button">Alle Tage, ganzer Tag, alles</button></div></div>`;
   }
 
   async function compute() {
@@ -1003,18 +1100,20 @@
     const out = () => $('#aOut');
     try {
       if (S.tab === 'standzeit') { renderIdle(); return; }
-      if (!dates.length) { out().innerHTML = '<p class="hint">Im gewählten Zeitraum gibt es keine Daten.</p>'; return; }
-      if (!f.wd.some(Boolean)) { out().innerHTML = '<p class="hint">Bitte mindestens einen Wochentag wählen.</p>'; return; }
+      if (!dates.length) { legendClear(); clearRaster(); out().innerHTML = emptyState('Im gewählten Zeitraum gibt es keine Daten.'); return; }
+      if (!f.wd.some(Boolean)) { legendClear(); out().innerHTML = '<div class="empty">Bitte mindestens einen Wochentag wählen.</div>'; return; }
       let r;
       switch (S.tab) {
-        case 'verfuegbarkeit':
-          r = await rpc('avail', { F: f, dates, R: S.f.R, res: S.f.res, stops: toStops(RAMP.avail, 0.25, 0.85) });
+        case 'erreichbarkeit':
+          r = await rpc('reach', { F: f, dates, res: S.f.res, metric: S.f.reachMetric, R: S.f.R, stops: toStops(R.seq, 0.25, 0.9) });
           if (seq !== anSeq) return;
-          showRaster(r); S.raster = r; renderAvailOut(r); break;
+          if (!r.polls) { clearRaster(); legendClear(); out().innerHTML = emptyState('Keine Abfrage passt zum Filter.'); break; }
+          showRaster(r); renderReachOut(r); break;
         case 'dichte':
-          r = await rpc('density', { F: f, dates, res: S.f.res, smooth: S.f.smooth, stops: toStops(RAMP.dens, 0.2, 0.9) });
+          r = await rpc('density', { F: f, dates, res: S.f.res, smooth: S.f.smooth, stops: toStops(R.heat.slice(1), 0.25, 0.9) });
           if (seq !== anSeq) return;
-          showRaster(r); S.raster = r; renderDensOut(r); break;
+          if (!r.polls) { clearRaster(); legendClear(); out().innerHTML = emptyState('Keine Abfrage passt zum Filter.'); break; }
+          showRaster(r); renderDensOut(r); break;
         case 'nutzung':
           r = await rpc('usage', { F: f, dates, P: tripParams() });
           if (seq !== anSeq) return;
@@ -1033,7 +1132,7 @@
       if (S.sel?.type === 'station') stationQuery(S.sel.uid, true);
     } catch (err) {
       console.error(err);
-      if (seq === anSeq) out().innerHTML = `<div class="basis warn">Die Auswertung ist fehlgeschlagen: ${esc(err.message.split('\n')[0])}</div>`;
+      if (seq === anSeq) out().innerHTML = `<div class="empty">Die Auswertung ist fehlgeschlagen: ${esc(err.message.split('\n')[0])}</div>`;
     }
   }
 
@@ -1044,139 +1143,169 @@
     const b = r.bbox;
     map.getSource('raster').updateImage({ url: cv.toDataURL(), coordinates: [[b.w, b.n], [b.e, b.n], [b.e, b.s], [b.w, b.s]] });
   }
+  function clearRaster() { map.getSource('raster')?.updateImage({ url: PIXEL }); }
+  const legendClear = () => { $('#aLegend').innerHTML = ''; refreshSheet(); };
 
   function basisLine(polls, days, extra = '') {
-    const warn = polls < 12;
-    return `<div class="basis${warn ? ' warn' : ''}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16.5v.5"/></svg>
-      <div>Grundlage: ${nf.format(polls)} Abfragen an ${nf.format(days)} ${days === 1 ? 'Tag' : 'Tagen'}.${warn ? ' Das ist sehr wenig; die Werte sind noch zufällig.' : ''} ${extra}</div></div>`;
+    const warn = polls < 30;
+    return `<p class="basis${warn ? ' warn' : ''}">Grundlage: ${nf.format(polls)} Abfragen an ${nf.format(days)} ${days === 1 ? 'Tag' : 'Tagen'}.${warn ? ' Das ist noch wenig, die Werte sind eher zufällig.' : ''} ${extra}</p>`;
   }
-  const legendTop = (txt) => `<div class="top"><div class="cap">${txt}</div></div>`;
+  const legend = (cap, body) => { $('#aLegend').innerHTML = `<div class="top"><div class="cap">${cap}</div></div>${body}`; refreshSheet(); };
 
-  function renderAvailOut(r) {
-    $('#aLegend').innerHTML = `${legendTop(`Chance auf mindestens ein Rad im Umkreis von ${S.f.R} m, ${wdLabel()} ${winLabel()}`)}
-      <div class="bar" style="background:${gradient(RAMP.avail)}"></div><div class="scale"><span>1 %</span><span>50 %</span><span>100 %</span></div>`;
-    $('#aOut').innerHTML = `${basisLine(r.polls, r.days, r.auto ? `Auflösung automatisch auf ${r.res} m vergröbert, damit es schnell bleibt.` : '')}
-      <p class="hint">Tippe irgendwo auf die Karte: Dann wird genau für diesen Punkt gerechnet, mit Tagesverlauf und typischem Abstand zum nächsten Rad.</p>
-      ${S.me ? '<button class="btn sm ghost" data-act="pointme" type="button">Meinen Standort auswerten</button>' : ''}`;
+  function renderReachOut(r) {
+    if (S.f.reachMetric === 'prob') {
+      legend(`Chance auf ein Rad im Umkreis von ${S.f.R} m`, `<div class="bar" style="background:${gradient(R.seq)}"></div><div class="scale"><span>selten</span><span>50 %</span><span>immer</span></div>`);
+    } else {
+      legend('Typischer Weg zum nächsten Rad', `<div class="bar" style="background:${gradient(R.seq)}"></div><div class="scale"><span>über 1,5 km</span><span>300 m</span><span>unter 50 m</span></div>`);
+    }
+    $('#aOut').innerHTML = `${basisLine(r.polls, r.days, r.sampled > r.polls ? `Gleichmäßige Stichprobe aus ${nf.format(r.sampled)} passenden Abfragen.` : '')}
+      <p class="hint">Tipp: irgendwo auf die Karte tippen. Dann wird für genau diesen Ort gerechnet, mit Tagesverlauf.</p>
+      ${S.me ? '<div class="actions"><button class="btn sm ghost" data-act="pointme" type="button">Meinen Standort auswerten</button></div>' : ''}`;
   }
 
   function renderDensOut(r) {
-    $('#aLegend').innerHTML = `${legendTop(`Durchschnittlich abgestellte Räder pro Hektar, ${wdLabel()} ${winLabel()}`)}
-      <div class="bar" style="background:${gradient(RAMP.dens)}"></div><div class="scale"><span>wenige</span><span>${nf1.format(r.vmax)} pro ha</span></div>`;
-    $('#aOut').innerHTML = `${basisLine(r.polls, r.days)}
-      <p class="hint">Aus den echten Radpositionen gemittelt und mit ${S.f.smooth ? `${S.f.smooth} m` : 'keiner'} Glättung weichgezeichnet. Ein Hektar sind 100 × 100 m. Tippe auf die Karte für den Tagesverlauf an diesem Punkt.</p>`;
+    legend('Abgestellte Räder pro Hektar, im Schnitt', `<div class="bar" style="background:${gradient(R.heat.slice(1))}"></div><div class="scale"><span>wenige</span><span>${nf1.format(r.vmax)} pro ha</span></div>`);
+    $('#aOut').innerHTML = `${basisLine(r.polls, r.days)}<p class="hint">Tipp: auf die Karte tippen für den Tagesverlauf an diesem Ort.</p>`;
   }
 
   function renderUsageOut(r) {
     const { t0, t1 } = winMin();
-    $('#aLegend').innerHTML = `<div class="tiles">
-      <div class="stat"><b>${r.perDay != null ? nf.format(Math.round(r.perDay)) : '–'}</b><span>Fahrten pro Tag</span></div>
+    legend(`Fahrten mit Start ${winLabel() === 'ganzer Tag' ? 'über den ganzen Tag' : `${winLabel()} Uhr`}, ${wdLabel()}`, `<div class="tiles">
+      <div class="stat"><b>${r.perDay != null ? nf.format(Math.round(r.perDay)) : '–'}</b><span>pro Tag</span></div>
       <div class="stat"><b>${r.medDur != null ? `${nf.format(Math.round(r.medDur))} min` : '–'}</b><span>Dauer, Median</span></div>
-      <div class="stat"><b>${r.medDist != null ? fmtDist(r.medDist) : '–'}</b><span>Luftlinie, Median</span></div></div>
-      <p class="hint" style="margin-top:6px">Fahrten mit Start ${winLabel()}, ${wdLabel()}</p>`;
+      <div class="stat"><b>${r.medDist != null ? fmtDist(r.medDist) : '–'}</b><span>Strecke, Median</span></div></div>`);
+    if (!r.series.t.length) { $('#aOut').innerHTML = emptyState('Keine Abfrage passt zum Filter.'); return; }
     const dur = r.durH, dist = r.distH;
     $('#aOut').innerHTML = `${basisLine(r.series.t.length, r.days)}
-      <div class="block">${lineChart({ title: 'Räder unterwegs nach Uhrzeit', sub: `Durchschnitt, ${wdLabel()}`, series: [{ name: wdLabel(), color: C.wd, values: r.inuseH }], band: [t0, t1] })}</div>
-      <div class="block">${lineChart({ title: 'Fahrtbeginne pro Stunde', sub: `Durchschnitt, ${wdLabel()}`, series: [{ name: wdLabel(), color: C.wd, values: r.perHour }], band: [t0, t1] })}</div>
-      <div class="block">${timeChart({ title: 'Räder unterwegs im Zeitraum', t: r.series.t, values: r.series.inuse, color: C.we })}</div>
-      <div class="block">${barChart({ title: 'Fahrtdauer', sub: `${nf.format(r.count - r.short)} Fahrten mit messbarer Dauer`, values: dur,
-        labels: dur.map((_, k) => (k === dur.length - 1 ? '>2 h' : `${k * 5}–${k * 5 + 5} min`)), tickEvery: 6, tickLabel: (k) => (k === dur.length - 1 ? '' : `${k * 5}`), unitX: 'min' })}</div>
+      ${!r.count ? emptyState('Im gewählten Zeitfenster wurden keine Fahrten erkannt.') : ''}
+      <div class="block">${lineChart({ title: 'Räder unterwegs nach Uhrzeit', sub: 'Durchschnitt', series: [{ name: wdLabel(), color: C.trip, values: r.inuseH }], band: [t0, t1] })}</div>
+      <div class="block">${lineChart({ title: 'Fahrtbeginne pro Stunde', sub: 'Durchschnitt', series: [{ name: wdLabel(), color: C.trip, values: r.perHour }], band: [t0, t1] })}</div>
+      <div class="block">${timeChart({ title: 'Räder unterwegs im Zeitraum', t: r.series.t, values: r.series.inuse, color: C.trip })}</div>
+      <div class="block">${barChart({ title: 'Fahrtdauer', sub: `${nf.format(r.count - r.short)} mit messbarer Dauer`, values: dur,
+        labels: dur.map((_, k) => (k === dur.length - 1 ? 'über 2 Std.' : `${k * 5}–${k * 5 + 5} min`)), tickEvery: 6, tickLabel: (k) => (k === dur.length - 1 ? '' : `${k * 5}`), unitX: 'min' })}</div>
       <div class="block">${barChart({ title: 'Strecke (Luftlinie)', sub: `${nf.format(r.count)} Fahrten`, values: dist,
-        labels: dist.map((_, k) => (k === dist.length - 1 ? '>8 km' : `${nf1.format(k * 0.25)}–${nf1.format(k * 0.25 + 0.25)} km`)), tickEvery: 4, tickLabel: (k) => (k === dist.length - 1 ? '' : nf1.format(k * 0.25)), unitX: 'km' })}</div>
-      <p class="hint">Nicht als Fahrt gezählt: ${nf.format(r.service)} Abwesenheiten über ${nf1.format(S.f.maxDurH)} h und ${nf.format(r.round)} Rückkehren an denselben Ort. Kurze Fahrten zwischen zwei Abfragen haben keine messbare Dauer. Umverteilung per Transporter lässt sich nicht sicher abtrennen.</p>`;
+        labels: dist.map((_, k) => (k === dist.length - 1 ? 'über 8 km' : `${nf1.format(k * 0.25)}–${nf1.format(k * 0.25 + 0.25)} km`)), tickEvery: 4, tickLabel: (k) => (k === dist.length - 1 ? '' : nf1.format(k * 0.25)), unitX: 'km' })}</div>
+      <p class="hint">Nicht als Fahrt gezählt: ${nf.format(r.service)} Abwesenheiten über ${nf1.format(S.f.maxDurH)} Std. und ${nf.format(r.round)} Rückkehren an denselben Ort.</p>`;
   }
 
-  function nearestLiveStation(lng, lat) {
+  function nearestStationName(lng, lat) {
     let best = null, bd = Infinity;
     for (const s of S.live?.stations || []) { const d = hav(lat, lng, s.lat, s.lng); if (d < bd) { bd = d; best = s; } }
-    return best ? best.name : `${nf1.format(lat)}, ${nf1.format(lng)}`;
+    return best ? (bd > 600 ? `nahe ${best.name}` : best.name) : `${nf1.format(lat)}, ${nf1.format(lng)}`;
   }
 
+  // ---- flows, with particles moving along the lines
+  let flowLines = [], partRaf = 0, partFrame = 0;
   function renderFlowsOut(r) {
     const max = Math.max(1, ...r.lines.map((l) => l[4]));
-    setData('flows', { type: 'FeatureCollection', features: r.lines.map(([x0, y0, x1, y1, c]) => ({
-      type: 'Feature', geometry: { type: 'LineString', coordinates: arc([x0, y0], [x1, y1]) }, properties: { w: 0.15 + 0.85 * (c / max), c } })) });
+    flowLines = r.lines.map(([x0, y0, x1, y1, c]) => ({ a: [x0, y0], b: [x1, y1], c, w: c / max, n: Math.max(1, Math.round((c / max) * 4)), seed: Math.random() }));
+    setData('flows', { type: 'FeatureCollection', features: flowLines.map((l) => ({
+      type: 'Feature', geometry: { type: 'LineString', coordinates: arcPath(l.a, l.b, 1, 20) }, properties: { w: l.w, c: l.c } })) });
     const vmax = Math.max(1, ...r.cells.map((c) => c[2] + c[3]));
     setData('netc', { type: 'FeatureCollection', features: r.cells.filter((c) => c[2] + c[3] >= 2).map(([x, y, s, e]) => ({
       type: 'Feature', geometry: { type: 'Point', coordinates: [x, y] }, properties: { v: (e - s) / (e + s), n: e + s, s, e, rel: Math.sqrt((e + s) / vmax) } })) });
-    $('#aLegend').innerHTML = `${legendTop(`Bilanz je ${fmtDist(r.cell)}-Feld: mehr Fahrten beginnen (rot) oder enden (blau)`)}
-      <div class="bar" style="background:${gradient([R.div.neg[0], R.div.neg[1], R.div.neg[2], R.div.mid, R.div.pos[0], R.div.pos[1], R.div.pos[2]])}"></div>
-      <div class="scale"><span>Abfluss</span><span>ausgeglichen</span><span>Zufluss</span></div>`;
+    legend('Kreise: Bilanz je Bereich. Linien: häufigste Verbindungen, die Punkte zeigen die Richtung.',
+      `<div class="bar" style="background:${gradient([R.div.neg[0], R.div.neg[1], R.div.neg[2], R.div.mid, R.div.pos[0], R.div.pos[1], R.div.pos[2]])}"></div>
+      <div class="scale"><span>mehr Abfahrten</span><span>ausgeglichen</span><span>mehr Ankünfte</span></div>`);
+    if (!r.trips) { $('#aOut').innerHTML = emptyState('Keine Fahrten im Filter.'); stopParticles(); return; }
     const top = r.lines.slice(0, 12);
-    $('#aOut').innerHTML = `${basisLine(r.trips, filterDates().dates.length, `${nf.format(r.trips)} geschätzte Fahrten im Filter.`)}
-      <p class="hint">Kreise: Größe = Zahl der Fahrten, Farbe = Bilanz. Linien: häufigste Verbindungen, kräftiger zum Ziel hin.</p>
-      <h2 style="margin-top:12px">Häufigste Verbindungen</h2>
-      ${top.length ? `<ul class="rows">${top.map(([x0, y0, x1, y1, c]) => `<li><span class="main"><b>${esc(nearestLiveStation(x0, y0))}</b><small>nach ${esc(nearestLiveStation(x1, y1))}, ${fmtDist(hav(y0, x0, y1, x1))}</small></span><span class="val">${nf.format(c)}<small>Fahrten</small></span></li>`).join('')}</ul>`
+    $('#aOut').innerHTML = `${basisLine(r.trips, filterDates().dates.length, '')}
+      <h2>Häufigste Verbindungen</h2>
+      ${top.length ? `<ul class="rows">${top.map(([x0, y0, x1, y1, c]) => `<li><span class="main"><b>${esc(nearestStationName(x0, y0))}</b><small>nach ${esc(nearestStationName(x1, y1))}, ${fmtDist(hav(y0, x0, y1, x1))}</small></span><span class="val">${nf.format(c)}<small>${c === 1 ? 'Fahrt' : 'Fahrten'}</small></span></li>`).join('')}</ul>`
         : '<p class="hint">Keine Verbindung erreicht die Mindestzahl.</p>'}`;
+    $('#aOut .basis').textContent = `Grundlage: ${nf.format(r.trips)} geschätzte Fahrten an ${nf.format(filterDates().dates.length)} ${filterDates().dates.length === 1 ? 'Tag' : 'Tagen'}.`;
+    startParticles();
   }
-
-  function arc(a, b) {
-    const [x0, y0] = a, [x1, y1] = b;
-    const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
-    const dx = x1 - x0, dy = (y1 - y0) * 1.58;
-    const cx = mx - dy * 0.18, cy = my + (dx * 0.18) / 1.58;
-    const pts = [];
-    for (let k = 0; k <= 20; k++) { const t = k / 20, u = 1 - t; pts.push([u * u * x0 + 2 * u * t * cx + t * t * x1, u * u * y0 + 2 * u * t * cy + t * t * y1]); }
-    return pts;
+  function startParticles() {
+    stopParticles();
+    if (REDUCED) { drawParticles(0.7, true); return; }
+    let last = performance.now(), acc = 0;
+    const tick = (ts) => {
+      acc += (ts - last) / 1000; last = ts;
+      if (S.mode === 'analyse' && S.tab === 'stroeme') { drawParticles(acc / 3.2); partRaf = requestAnimationFrame(tick); }
+    };
+    partRaf = requestAnimationFrame(tick);
+  }
+  function stopParticles() { cancelAnimationFrame(partRaf); partRaf = 0; if (styleReady) setData('particles', EMPTY); }
+  function drawParticles(phase, still) {
+    if (!still && partFrame++ % 2) return; // ~30 fps is plenty
+    const feats = [];
+    for (const l of flowLines) {
+      for (let k = 0; k < l.n; k++) {
+        const u = still ? phase : (phase + k / l.n + l.seed) % 1;
+        feats.push({ type: 'Feature', geometry: { type: 'Point', coordinates: arcPoint(l.a, l.b, u) }, properties: { o: Math.min(1, u * 4, (1 - u) * 6) } });
+      }
+    }
+    setData('particles', { type: 'FeatureCollection', features: feats });
   }
 
   function showNetCell(p, lngLat) {
     showDetail('#detailA', `
-      <p class="kicker">Feld bei ${esc(nearestLiveStation(lngLat[0], lngLat[1]))}</p>
-      <h3>${nf.format(p.s)} Starts, ${nf.format(p.e)} Ankünfte</h3>
-      <p class="hint" style="margin-top:-4px">${wdLabel()}, ${winLabel()}, ${rangeLabel()}. ${p.e > p.s ? 'Hier sammeln sich Räder an.' : p.e < p.s ? 'Von hier fahren mehr Räder weg als ankommen.' : 'Ausgeglichen.'}</p>`);
+      <p class="kicker">Bereich bei ${esc(nearestStationName(lngLat[0], lngLat[1]))}</p>
+      <h3>${nf.format(p.s)} Abfahrten, ${nf.format(p.e)} Ankünfte</h3>
+      <p class="hint">${wdLabel()}, ${winLabel()}, ${rangeLabel()}. ${p.e > p.s ? 'Hier sammeln sich Räder an.' : p.e < p.s ? 'Von hier fahren mehr Räder weg als ankommen.' : 'Ausgeglichen.'}</p>`);
     select({ type: 'Point', coordinates: lngLat });
   }
 
+  // ---- stations
   function renderStationsOut(r) {
     S.stList = r.list;
-    setData('anst', { type: 'FeatureCollection', features: r.list.filter((s) => s.p != null).map((s) => ({
-      type: 'Feature', geometry: { type: 'Point', coordinates: [s.lng, s.lat] }, properties: { uid: s.uid, p: s.p, a: s.avg } })) });
-    $('#aLegend').innerHTML = `${legendTop(`Chance, dass die Station ${S.f.k ? `höchstens ${S.f.k} ${S.f.k === 1 ? 'Rad' : 'Räder'} hat` : 'leer ist'} (Größe: Ø Räder)`)}
-      <div class="bar" style="background:${gradient(R.red)}"></div><div class="scale"><span>0 %</span><span>50 %</span><span>100 %</span></div>`;
     const rows = r.list.filter((s) => s.p != null);
-    const empty = rows.slice().sort((x, y) => y.p - x.p || x.avg - y.avg).slice(0, 8);
-    const full = rows.slice().sort((x, y) => y.avg - x.avg).slice(0, 5);
+    const amax = Math.max(1, ...rows.map((s) => s.avg));
+    setData('anst', { type: 'FeatureCollection', features: rows.map((s) => ({
+      type: 'Feature', geometry: { type: 'Point', coordinates: [s.lng, s.lat] }, properties: { uid: s.uid, p: s.p, a: s.avg, r: s.avg / amax } })) });
+    const empty = S.f.stMetric === 'empty';
+    map.setPaintProperty('an-st', 'circle-color', empty
+      ? ['interpolate', ['linear'], ['get', 'p'], 0, R.red[0], 33, R.red[1], 66, R.red[2], 100, R.red[3]]
+      : ['interpolate', ['linear'], ['get', 'r'], 0, R.blue[0], 0.33, R.blue[1], 0.66, R.blue[2], 1, R.blue[3]]);
+    if (empty) legend(`Chance, dass die Station ${S.f.k ? `höchstens ${S.f.k} ${S.f.k === 1 ? 'Rad' : 'Räder'} hat` : 'leer ist'}`, `<div class="bar" style="background:${gradient(R.red)}"></div><div class="scale"><span>nie</span><span>50 %</span><span>immer</span></div>`);
+    else legend('Durchschnittliche Zahl Räder an der Station', `<div class="bar" style="background:${gradient(R.blue)}"></div><div class="scale"><span>0</span><span>${nf1.format(amax / 2)}</span><span>${nf1.format(amax)}</span></div>`);
+    if (!rows.length) { $('#aOut').innerHTML = emptyState('Keine Abfrage passt zum Filter.'); return; }
+    const emp = rows.slice().sort((x, y) => y.p - x.p || x.avg - y.avg).slice(0, 8);
+    const full = rows.slice().sort((x, y) => y.avg - x.avg).slice(0, 6);
+    const kl = S.f.k ? 'fast leer' : 'leer';
     const li = (s, v, sub) => `<li><button class="rowbtn" data-act="stq" data-id="${esc(s.uid)}"><span class="main"><b>${esc(s.name)}</b><small>${sub}</small></span><span class="val">${v}</span></button></li>`;
     $('#aOut').innerHTML = `${basisLine(r.polls, filterDates().dates.length)}
-      <h2 style="margin-top:12px">Am häufigsten ${S.f.k ? 'fast leer' : 'leer'}</h2><ul class="rows">${empty.map((s) => li(s, `${Math.round(s.p)} %<small>${S.f.k ? 'fast leer' : 'leer'}</small>`, `Ø ${nf1.format(s.avg)} Räder`)).join('')}</ul>
-      <h2 style="margin-top:16px">Meist gut gefüllt</h2><ul class="rows">${full.map((s) => li(s, `${nf1.format(s.avg)}<small>Räder Ø</small>`, `${Math.round(s.p)} % ${S.f.k ? 'fast leer' : 'leer'}`)).join('')}</ul>`;
+      <h2>Am häufigsten ${kl}</h2><ul class="rows">${emp.map((s) => li(s, `${Math.round(s.p)} %<small>der Zeit ${kl}</small>`, `im Schnitt ${nf1.format(s.avg)} Räder`)).join('')}</ul>
+      <h2 class="spaced">Meist gut gefüllt</h2><ul class="rows">${full.map((s) => li(s, `${nf1.format(s.avg)}<small>Räder im Schnitt</small>`, `${Math.round(s.p)} % der Zeit ${kl}`)).join('')}</ul>`;
   }
 
-  // exact query for one map location
-  async function pointQuery(lng, lat, quiet) {
-    S.sel = { type: 'point', lng, lat };
-    const R = S.f.R;
-    setData('qpt', { type: 'FeatureCollection', features: [circle([lng, lat], R), { type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] }, properties: {} }] });
-    if (!quiet) showDetail('#detailA', '<p class="kicker">Ausgewählter Ort</p><h3>…</h3><span class="busy">rechnet …</span>', { keepSel: true });
-    const { dates } = filterDates();
-    const r = await rpc('point', { F: F(), dates, lat, lng, R });
-    if (S.sel?.type !== 'point' || S.sel.lng !== lng) return;
-    const dens = S.tab === 'dichte';
-    const w = r.win;
-    const where = nearestLiveStation(lng, lat);
-    const head = !w ? 'keine Daten' : dens ? `${nf1.format(w.avg)} Räder` : `${Math.round(w.pct)} %`;
-    const sub = !w ? '' : dens ? `im Schnitt im Umkreis von ${R} m, ${wdLabel()} ${winLabel()}` : `Chance auf mindestens ein Rad im Umkreis von ${R} m, ${wdLabel()} ${winLabel()}`;
-    const vals = (o) => (dens ? o.avg : o.pct);
-    showDetail('#detailA', `
-      <p class="kicker">Nahe ${esc(where)}</p>
-      <h3>${head}</h3>
-      <p class="hint" style="margin-top:-4px">${sub}${w ? `. Grundlage: ${nf.format(w.n)} Abfragen.` : ''}</p>
-      ${w && !dens ? `<dl class="kv" style="margin-top:6px"><dt>Ø Räder im Umkreis</dt><dd>${nf1.format(w.avg)}</dd>
-        ${r.nearestMedian != null ? `<dt>Nächstes Rad typisch</dt><dd>${fmtDist(r.nearestMedian)} entfernt (Median)</dd>` : ''}</dl>` : ''}
-      ${lineChart({ title: dens ? 'Räder im Umkreis über den Tag' : 'Chance über den Tag', sub: '15-Minuten-Schritte', unit: dens ? '' : '%', yMax: dens ? null : 100,
-        series: [{ name: wdLabel(), color: C.wd, values: vals(r.sel) }, ...(wdLabel() !== 'alle Tage' ? [{ name: 'alle Tage', color: C.muted, values: vals(r.all) }] : [])],
-        band: [winMin().t0, winMin().t1] })}
-      <div class="actions"><button class="btn sm ghost" data-act="clearpoint">Auswahl aufheben</button></div>`, { keepSel: true, quiet });
-  }
-
+  // ---- point and station queries
   function circle([lng, lat], r) {
     const pts = [];
     for (let k = 0; k <= 64; k++) {
       const a = (k / 64) * 2 * Math.PI;
-      pts.push([lng + (r * Math.cos(a)) / (111320 * Math.cos(lat * Math.PI / 180)), lat + (r * Math.sin(a)) / 111320]);
+      pts.push([lng + (r * Math.cos(a)) / (111320 * Math.cos((lat * Math.PI) / 180)), lat + (r * Math.sin(a)) / 111320]);
     }
     return { type: 'Feature', geometry: { type: 'Polygon', coordinates: [pts] }, properties: {} };
+  }
+
+  async function pointQuery(lng, lat, quiet) {
+    S.sel = { type: 'point', lng, lat };
+    const Rq = S.tab === 'dichte' ? 150 : S.f.reachMetric === 'prob' ? S.f.R : 200;
+    setData('qpt', { type: 'FeatureCollection', features: [circle([lng, lat], Rq), { type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] }, properties: {} }] });
+    applyVisibility();
+    if (!quiet) showDetail('#detailA', '<p class="kicker">Ausgewählter Ort</p><h3>…</h3><span class="busy">rechnet</span>', { keepSel: true });
+    const { dates } = filterDates();
+    if (!dates.length) return;
+    const r = await rpc('point', { F: F(), dates, lat, lng, R: Rq });
+    if (S.sel?.type !== 'point' || S.sel.lng !== lng) return;
+    const dens = S.tab === 'dichte', w = r.win;
+    let head, sub;
+    if (!w) { head = 'keine Daten'; sub = 'Keine Abfrage passt zum Filter'; }
+    else if (dens) { head = `${nf1.format(w.avg)} Räder`; sub = `stehen im Schnitt im Umkreis von ${Rq} m (${wdLabel()}, ${winLabel()})`; }
+    else if (S.f.reachMetric === 'prob') { head = `${Math.round(w.pct)} %`; sub = `Chance auf mindestens ein Rad im Umkreis von ${Rq} m (${wdLabel()}, ${winLabel()})`; }
+    else { head = r.nearestMedian != null ? fmtDist(r.nearestMedian) : '–'; sub = `typischer Weg zum nächsten Rad, Luftlinie (${wdLabel()}, ${winLabel()})`; }
+    const vals = (o) => (dens ? o.avg : o.pct);
+    showDetail('#detailA', `
+      <p class="kicker">${esc(nearestStationName(lng, lat))}</p>
+      <h3>${head}</h3>
+      <p class="hint">${sub}.${w ? ` Grundlage: ${nf.format(w.n)} Abfragen.` : ''}</p>
+      ${w && !dens ? `<dl class="kv"><dt>Rad im Umkreis ${Rq} m</dt><dd>${Math.round(w.pct)} % der Zeit</dd><dt>Räder im Umkreis</dt><dd>${nf1.format(w.avg)} im Schnitt</dd></dl>` : ''}
+      ${lineChart({ title: dens ? `Räder im Umkreis von ${Rq} m` : `Chance auf ein Rad im Umkreis von ${Rq} m`, sub: 'über den Tag', unit: dens ? '' : '%', yMax: dens ? null : 100,
+        series: [{ name: wdLabel(), color: C.wd, values: vals(r.sel) }, ...(wdLabel() !== 'alle Tage' ? [{ name: 'alle Tage', color: C.muted, values: vals(r.all) }] : [])],
+        band: [winMin().t0, winMin().t1] })}
+      <div class="actions"><button class="btn sm ghost" data-act="clearpoint">Auswahl aufheben</button></div>`, { keepSel: true, quiet });
   }
 
   async function stationQuery(uid, quiet, target = '#detailA') {
@@ -1186,9 +1315,11 @@
     const k = S.f.k;
     const r = await rpc('stationProfile', { F: F(), dates, uid: String(uid), k });
     const el = target === '#detailA' ? null : $(target);
-    if (!r) { if (el) el.innerHTML = '<p class="hint">Noch keine Auswertung für diese Station.</p>'; return; }
-    const charts = `${lineChart({ title: 'Räder im Tagesverlauf', sub: 'Durchschnitt', series: [{ name: wdLabel(), color: C.wd, values: r.sel.avg }, ...(wdLabel() !== 'alle Tage' ? [{ name: 'alle Tage', color: C.muted, values: r.all.avg }] : [])], band: [winMin().t0, winMin().t1] })}
-      ${lineChart({ title: k ? `Chance auf höchstens ${k} ${k === 1 ? 'Rad' : 'Räder'}` : 'Chance, dass sie leer ist', unit: '%', yMax: 100, series: [{ name: wdLabel(), color: C.wd, values: r.sel.p }, ...(wdLabel() !== 'alle Tage' ? [{ name: 'alle Tage', color: C.muted, values: r.all.p }] : [])], band: [winMin().t0, winMin().t1] })}
+    if (!r) { if (el) el.innerHTML = '<p class="hint">Für diese Station gibt es noch keine Auswertung.</p>'; return; }
+    const multi = wdLabel() !== 'alle Tage';
+    const band = target === '#detailA' ? [winMin().t0, winMin().t1] : null;
+    const charts = `${lineChart({ title: 'Räder im Tagesverlauf', sub: 'Durchschnitt', series: [{ name: wdLabel(), color: C.wd, values: r.sel.avg }, ...(multi ? [{ name: 'alle Tage', color: C.muted, values: r.all.avg }] : [])], band })}
+      ${lineChart({ title: k ? `Chance auf höchstens ${k} ${k === 1 ? 'Rad' : 'Räder'}` : 'Chance, dass sie leer ist', unit: '%', yMax: 100, series: [{ name: wdLabel(), color: C.wd, values: r.sel.p }, ...(multi ? [{ name: 'alle Tage', color: C.muted, values: r.all.p }] : [])], band })}
       <p class="hint">${wdLabel()}, ${rangeLabel()}.</p>`;
     if (el) { el.innerHTML = charts; bindCharts(el); return; }
     if (S.sel?.type !== 'station' || S.sel.uid !== uid) return;
@@ -1196,52 +1327,74 @@
     showDetail('#detailA', `
       <p class="kicker"><span class="dot" style="background:${C.station}"></span>Station</p>
       <h3>${esc(r.name)}</h3>
-      ${s && s.p != null ? `<p class="hint" style="margin-top:-4px">${wdLabel()} ${winLabel()}: in ${Math.round(s.p)} % der Abfragen ${k ? `höchstens ${k} ${k === 1 ? 'Rad' : 'Räder'}` : 'leer'}, im Schnitt ${nf1.format(s.avg)} Räder.</p>` : ''}
+      ${s && s.p != null ? `<p class="hint">${wdLabel()}, ${winLabel()}: im Schnitt ${nf1.format(s.avg)} Räder, ${Math.round(s.p)} % der Zeit ${k ? `höchstens ${k}` : 'leer'}.</p>` : ''}
       ${charts}`, { keepSel: true, quiet });
     select({ type: 'Point', coordinates: [r.lng, r.lat] });
     if (!quiet) flyTo([r.lng, r.lat], 14);
   }
 
-  // ---- idle (from the live snapshot)
+  // ---- idle time on a continuous scale, minutes to days
+  const IDLE_TICKS = [[3600, '1 Std.'], [6 * 3600, '6 Std.'], [86400, '1 Tag'], [7 * 86400, '7 Tage']];
+  const idleL = (s) => Math.min(1, Math.max(0, Math.log(Math.max(s, 600) / 600) / Math.log((14 * 86400) / 600)));
   function renderIdle() {
     if (!S.live || S.mode !== 'analyse' || S.tab !== 'standzeit') return;
-    const t = now(), bins = [0, 0, 0, 0];
-    const cls = (b) => { const d = (t - b.since) / 86400; return d < 1 ? 0 : d < 3 ? 1 : d < 7 ? 2 : 3; };
-    const ok = (b) => b.since && (t - b.since) / 86400 >= S.f.idleMin && kindOk(b);
+    const t = now();
     const kindOk = (b) => S.f.kind === 'all' || (S.f.kind === 'free' ? b.kind !== 'station' : b.kind === 'station');
-    const feats = [];
-    for (const b of S.live.bikes) {
-      if (!ok(b)) continue;
-      const c = cls(b); bins[c]++;
-      feats.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [b.lng, b.lat] }, properties: { c, id: b.bike } });
-    }
-    setData('idle', { type: 'FeatureCollection', features: feats });
-    const labels = ['unter 1 Tag', '1–3 Tage', '3–7 Tage', 'über 7 Tage'];
-    $('#aLegend').innerHTML = `<div class="cap">Wie lange ein Rad unberührt am selben Ort steht</div>
-      <div class="cats">${labels.map((l, k) => `<span><i style="background:${R.idle[k]}"></i>${l} (${nf.format(bins[k])})</span>`).join('')}</div>`;
-    const longest = S.live.bikes.filter(ok).sort((a, b) => a.since - b.since).slice(0, 20);
-    const out = $('#aOut');
-    if (!out) return;
-    out.innerHTML = `<h2>Am längsten unbewegt</h2><ul class="rows">${longest.map((b) => {
-      const st = b.kind === 'station' ? S.live.stById.get(String(b.place_uid)) : null;
-      return `<li><button class="rowbtn" data-act="bike" data-id="${esc(b.bike)}"><span class="dot" style="background:${R.idle[cls(b)]}"></span>
-        <span class="main"><b>Rad ${esc(b.bike)}</b><small>${st ? esc(st.name) : 'frei abgestellt'}</small></span>
-        <span class="val">${b.since_censored ? 'mind. ' : ''}${fmtDur(t - b.since).replace(' Tagen', ' Tg.')}</span></button></li>`;
-    }).join('')}</ul>
-      <p class="hint">Ein Rad gilt als bewegt, wenn es aus dem Feed verschwindet oder sich mehr als 100 m verschiebt. Standzeiten, die vor Beginn der Aufzeichnung anfingen, sind als „mind.“ markiert.</p>`;
+    const all = S.live.bikes.filter((b) => b.since && kindOk(b)).map((b) => ({ b, s: Math.max(0, t - b.since) }));
+    const shown = all.filter((x) => x.s >= S.f.idleMin);
+    setData('idle', { type: 'FeatureCollection', features: shown.map(({ b, s }) => ({
+      type: 'Feature', geometry: { type: 'Point', coordinates: [b.lng, b.lat] }, properties: { l: idleL(s), id: b.bike } })) });
+    legend('Unbewegt seit', `<div class="bar" style="background:${gradient(R.idle)}"></div>
+      <div class="scale log"><span style="left:0">10 Min.</span>${IDLE_TICKS.map(([s, l]) => `<span style="left:${idleL(s) * 100}%">${l}</span>`).join('')}<span style="left:100%">14 Tage</span></div>`);
+    const out = $('#aOut'); if (!out) return;
+    if (!all.length) { out.innerHTML = '<div class="empty">Keine Standzeiten verfügbar.</div>'; return; }
+    const censored = all.filter((x) => x.b.since_censored).length;
+    const longest = shown.slice().sort((a, b) => b.s - a.s).slice(0, 20);
+    out.innerHTML = `${survivalChart(all.map((x) => x.s))}
+      ${censored > all.length * 0.3 ? `<p class="basis warn">Die Aufzeichnung läuft erst seit kurzem. ${nf.format(censored)} Räder stehen seit Beginn unbewegt; ihre echte Standzeit ist länger.</p>` : ''}
+      <h2 class="spaced">Am längsten unbewegt</h2><ul class="rows">${longest.map(({ b, s }) => {
+        const st = b.kind === 'station' ? S.live.stById.get(String(b.place_uid)) : null;
+        return `<li><button class="rowbtn" data-act="bike" data-id="${esc(b.bike)}"><span class="dot" style="background:${R.idle[Math.round(idleL(s) * 4)]}"></span>
+          <span class="main"><b>Rad ${esc(b.bike)}</b><small>${st ? esc(st.name) : 'frei abgestellt'}</small></span>
+          <span class="val">${b.since_censored ? 'mind. ' : ''}${fmtDur(s)}</span></button></li>`;
+      }).join('')}</ul>`;
+    bindCharts(out);
   }
 
-  // ---------------------------------------------------------------- filter inputs
+  // share of bikes untouched for at least x (log x axis, 10 min to 14 days)
+  function survivalChart(vals) {
+    const H = 150, L = 34, Rr = 12, T = 10, B = 24, w = CW - L - Rr, h = H - T - B;
+    const n = vals.length, sorted = vals.slice().sort((a, b) => a - b);
+    const xs = [];
+    for (let k = 0; k <= 60; k++) xs.push(600 * ((14 * 86400) / 600) ** (k / 60));
+    const share = xs.map((x) => { let lo = 0, hi = n; while (lo < hi) { const m = (lo + hi) >> 1; if (sorted[m] < x) lo = m + 1; else hi = m; } return ((n - lo) / n) * 100; });
+    const X = (x) => L + idleL(x) * w, Y = (v) => T + h - (v / 100) * h;
+    const d = xs.map((x, k) => `${k ? 'L' : 'M'}${X(x).toFixed(1)},${Y(share[k]).toFixed(1)}`).join('');
+    const grid = [0, 50, 100].map((v) => `<line x1="${L}" x2="${L + w}" y1="${Y(v)}" y2="${Y(v)}"/>`).join('');
+    const ylab = [0, 50, 100].map((v) => `<text x="${L - 6}" y="${Y(v) + 3.5}" text-anchor="end">${v} %</text>`).join('');
+    const xlab = `<text x="${L}" y="${H - 6}">10 Min.</text>` + IDLE_TICKS.map(([s, l]) => `<text x="${X(s)}" y="${H - 6}" text-anchor="middle">${l}</text>`).join('') + `<text x="${L + w}" y="${H - 6}" text-anchor="end">14 Tage</text>`;
+    const id = `c${++chartSeq}`;
+    chartData.set(id, { kind: 'surv', xs, share, X, L, w });
+    return `<div class="chart" data-chart="${id}"><div class="chart-title"><h2>Wie lange stehen die Räder schon?</h2><span>${nf.format(n)} Räder</span></div>
+      <p class="hint chart-note">Anteil der Räder, die mindestens so lange unbewegt sind</p>
+      <svg viewBox="0 0 ${CW} ${H}" role="img" aria-label="Verteilung der Standzeiten"><g class="grid">${grid}</g><g class="axis">${ylab}${xlab}</g>
+      <path d="${d}" fill="none" stroke="${R.idle[3]}" stroke-width="2" stroke-linejoin="round"/>
+      <line class="xh" x1="0" x2="0" y1="${T}" y2="${T + h}" stroke="${C.muted}" stroke-width="1" visibility="hidden"/>
+      <rect class="hit" x="${L}" y="${T}" width="${w}" height="${h}"/></svg></div>`;
+  }
+
+  // ---- filter inputs
   let wTimer = 0;
   function stopWindowPlay() { S.wPlaying = false; clearInterval(wTimer); $('#wPlay').classList.remove('on'); }
   function startWindowPlay() {
     S.wPlaying = true; $('#wPlay').classList.add('on');
     clearInterval(wTimer);
+    if (S.f.a === 0 && S.f.b === 96) { S.f.a = 0; S.f.b = 4; }
     wTimer = setInterval(() => {
-      const width = ((S.f.b - S.f.a) % 96 + 96) % 96 || 4;
+      const width = (((S.f.b - S.f.a) % 96) + 96) % 96 || 4;
       S.f.a = (S.f.a + 4) % 96; S.f.b = (S.f.a + width) % 96 || 96;
       syncFilterUI(); saveFilter(); scheduleCompute(0);
-    }, 1400);
+    }, 1600);
   }
 
   function bindFilterInputs() {
@@ -1253,17 +1406,24 @@
         S.f[k] = +inp.value;
         $(`#${inp.id}-o`).textContent = FMT[k](inp.value);
         syncFilterUI(); saveFilter();
-        if (k === 'R' && S.sel?.type === 'point') setData('qpt', { type: 'FeatureCollection', features: [circle([S.sel.lng, S.sel.lat], S.f.R)] });
-        scheduleCompute(k === 'R' || k === 'res' ? 250 : 150);
+        scheduleCompute(200);
       });
     });
-    root.querySelectorAll('[data-seg]').forEach((seg) => seg.addEventListener('click', (e) => {
+    $('#p-idle')?.addEventListener('input', (e) => {
+      S.f.idleMin = IDLE_STEPS[+e.target.value];
+      $('#p-idle-o').textContent = idleLabel(S.f.idleMin);
+      saveFilter(); renderIdle();
+    });
+    root.querySelectorAll('[data-seg]').forEach((sg) => sg.addEventListener('click', (e) => {
       const b = e.target.closest('button'); if (!b) return;
-      const k = seg.dataset.seg;
-      S.f[k] = k === 'range' && b.dataset.v !== 'all' ? +b.dataset.v : b.dataset.v;
-      seg.querySelectorAll('button').forEach((x) => x.setAttribute('aria-checked', String(x === b)));
+      const k = sg.dataset.seg, v = b.dataset.v;
+      S.f[k] = (k === 'range' && v !== 'all') || k === 'res' || k === 'R' ? +v : v;
+      saveFilter();
+      if (k === 'reachMetric' || k === 'R') { const y = $('#scroll').scrollTop; enterAnalysis().then(() => { $('#scroll').scrollTop = y; }); return; }
+      sg.querySelectorAll('button').forEach((x) => x.setAttribute('aria-checked', String(x === b)));
       if (k === 'range') { const { from, to } = filterDates(); $('#fFrom').value = from; $('#fTo').value = to; }
-      syncFilterUI(); saveFilter(); scheduleCompute(0);
+      syncFilterUI();
+      if (S.tab === 'standzeit') renderIdle(); else scheduleCompute(0);
     }));
     for (const id of ['#fFrom', '#fTo']) $(id)?.addEventListener('change', () => {
       S.f.range = 'custom'; S.f.from = $('#fFrom').value; S.f.to = $('#fTo').value;
@@ -1273,7 +1433,7 @@
     root.querySelectorAll('[data-wd]').forEach((b) => b.addEventListener('click', () => {
       const i = +b.dataset.wd; S.f.wd[i] = S.f.wd[i] ? 0 : 1;
       b.setAttribute('aria-pressed', String(!!S.f.wd[i]));
-      syncFilterUI(); saveFilter(); scheduleCompute(200);
+      syncFilterUI(); saveFilter(); scheduleCompute(250);
     }));
     root.querySelectorAll('[data-wdp]').forEach((b) => b.addEventListener('click', () => {
       S.f.wd = b.dataset.wdp.split('').map(Number);
@@ -1282,26 +1442,30 @@
     }));
     root.querySelectorAll('[data-win]').forEach((b) => b.addEventListener('click', () => {
       const [a, c] = b.dataset.win.split(',').map(Number); S.f.a = a; S.f.b = c;
-      syncFilterUI(); saveFilter(); scheduleCompute(0);
+      stopWindowPlay(); syncFilterUI(); saveFilter(); scheduleCompute(0);
     }));
   }
 
-  // ---------------------------------------------------------------- detail
+  // ================================================================ detail card
   function showDetail(sel, html, opts = {}) {
     const el = $(sel);
-    el.innerHTML = `<button class="x" type="button" aria-label="Schließen" data-act="close">×</button>${html}`;
+    el.innerHTML = `<button class="x" type="button" aria-label="Schließen" data-act="close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>${html}`;
     el.hidden = false;
     bindCharts(el);
     if (!opts.keepSel) S.sel = null;
     if (!opts.quiet) {
       if (!isDesktop() && sheetState === 'peek') setSheet('half');
-      const sc = $('#scroll');
-      requestAnimationFrame(() => {
-        const peekH = $('.peek', el.parentElement).offsetHeight;
-        const top = el.offsetTop - peekH - 8;
-        if (sc.scrollTop > top) sc.scrollTo({ top: Math.max(0, top), behavior: REDUCED ? 'auto' : 'smooth' });
-      });
+      requestAnimationFrame(() => revealEl(el));
     }
+  }
+  // scroll the panel so el is visible below the (desktop: sticky) controls
+  function revealEl(el, force) {
+    const sc = $('#scroll');
+    const peek = isDesktop() ? $(`.mode[data-mode="${S.mode}"] .peek`).offsetHeight : 0;
+    const rel = el.getBoundingClientRect().top - sc.getBoundingClientRect().top;
+    const visible = isDesktop() ? sc.clientHeight : sheetVisibleHeight() - $('#grab').offsetHeight - $('#head').offsetHeight;
+    if (!force && rel >= peek && rel < visible - 140) return;
+    sc.scrollTo({ top: Math.max(0, sc.scrollTop + rel - peek - 8), behavior: REDUCED ? 'auto' : 'smooth' });
   }
   function closeDetail(silent) {
     for (const el of $$('.detail')) { el.hidden = true; el.innerHTML = ''; }
@@ -1310,9 +1474,7 @@
     if (!silent && !isDesktop() && sheetState === 'half') setSheet('peek');
   }
 
-  // ---------------------------------------------------------------- charts
-  // Small hand-rolled SVG charts: 2px lines, recessive grid, direct labels,
-  // hover/tap crosshair tooltip. Values with null are gaps.
+  // ================================================================ charts
   const CW = 340;
   function niceMax(v) {
     if (!(v > 0)) return 1;
@@ -1321,16 +1483,16 @@
   }
   let chartSeq = 0;
   const chartData = new Map();
+  const noData = (title) => `<div class="chart"><div class="chart-title"><h2>${title}</h2></div><p class="hint">Noch keine Daten.</p></div>`;
 
-  // values over one day (24 hours or 96 quarter hours); band = [t0, t1] minutes
+  // one day (24 hours or 96 quarter hours); band = [t0, t1] minutes
   function lineChart({ title, sub, series, unit = '', yMax, band }) {
-    const H = 150, L = 30, multi = series.length > 1, Rr = multi ? 62 : 10, T = 10, B = 22, w = CW - L - Rr, h = H - T - B;
+    const H = 150, L = 32, multi = series.length > 1, Rr = multi ? 64 : 10, T = 10, B = 22, w = CW - L - Rr, h = H - T - B;
     const n = series[0].values.length, perH = n / 24;
     const all = series.flatMap((s) => s.values).filter((v) => v != null);
-    if (!all.length) return `<div class="chart"><div class="chart-title"><h2>${title}</h2></div><p class="hint">Noch keine Daten.</p></div>`;
+    if (!all.length) return noData(title);
     const ymax = yMax ?? niceMax(Math.max(...all) * 1.08);
-    const X = (i) => L + ((i + 0.5) / n) * w, Y = (v) => T + h - (v / ymax) * h;
-    const XM = (min) => L + (min / 1440) * w;
+    const X = (i) => L + ((i + 0.5) / n) * w, Y = (v) => T + h - (v / ymax) * h, XM = (min) => L + (min / 1440) * w;
     const grid = [0, 0.5, 1].map((f) => `<line x1="${L}" x2="${L + w}" y1="${Y(ymax * f)}" y2="${Y(ymax * f)}"/>`).join('');
     const ylab = [0, 0.5, 1].map((f) => `<text x="${L - 6}" y="${Y(ymax * f) + 3.5}" text-anchor="end">${nf1.format(ymax * f)}${f === 1 ? unit : ''}</text>`).join('');
     const xlab = [0, 6, 12, 18, 24].map((hh) => `<text x="${XM(hh * 60)}" y="${H - 5}" text-anchor="${hh === 0 ? 'start' : hh === 24 ? 'end' : 'middle'}">${hh}</text>`).join('');
@@ -1350,7 +1512,7 @@
       const ends = series.map((s) => { let i = s.values.length - 1; while (i >= 0 && s.values[i] == null) i--; return i < 0 ? null : { s, y: Y(s.values[i]) }; }).filter(Boolean);
       ends.sort((a, b) => a.y - b.y);
       for (let k = 1; k < ends.length; k++) if (ends[k].y - ends[k - 1].y < 13) ends[k].y = ends[k - 1].y + 13;
-      labels = ends.map((e) => `<circle cx="${L + w + 6}" cy="${e.y}" r="3.5" fill="${e.s.color}"/><text class="dl" x="${L + w + 13}" y="${e.y + 4}">${esc(e.s.name)}</text>`).join('');
+      labels = ends.map((e) => `<circle cx="${L + w + 7}" cy="${e.y}" r="3.5" fill="${e.s.color}"/><text class="dl" x="${L + w + 14}" y="${e.y + 4}">${esc(e.s.name)}</text>`).join('');
     }
     const id = `c${++chartSeq}`;
     chartData.set(id, { kind: 'day', series, X, L, w, n, unit,
@@ -1363,21 +1525,22 @@
   }
 
   function timeChart({ title, t, values, color }) {
-    if (!t || t.length < 2) return `<div class="chart"><div class="chart-title"><h2>${title}</h2></div><p class="hint">Noch keine Daten.</p></div>`;
-    const H = 140, L = 30, Rr = 10, T = 10, B = 22, w = CW - L - Rr, h = H - T - B;
+    if (!t || t.length < 2) return noData(title);
+    const H = 140, L = 32, Rr = 10, T = 10, B = 22, w = CW - L - Rr, h = H - T - B;
     const ts = t[0], te = t[t.length - 1], span = Math.max(1, te - ts);
     const ymax = niceMax(Math.max(...values) * 1.08);
     const X = (x) => L + ((x - ts) / span) * w, Y = (v) => T + h - (v / ymax) * h;
-    let d = '';
-    values.forEach((v, i) => { d += `${i ? 'L' : 'M'}${X(t[i]).toFixed(1)},${Y(v).toFixed(1)}`; });
+    const d = values.map((v, i) => `${i ? 'L' : 'M'}${X(t[i]).toFixed(1)},${Y(v).toFixed(1)}`).join('');
     const days = [];
-    for (let x = ts - (ts % 3600); x <= te; x += 3600) if (localHour(x) === 0 && x > ts) days.push(x);
+    for (let x = ts - (ts % 3600) + 3600; x <= te; x += 3600) if (localHour(x) === 0) days.push(x);
     const grid = [0, 0.5, 1].map((f) => `<line x1="${L}" x2="${L + w}" y1="${Y(ymax * f)}" y2="${Y(ymax * f)}"/>`).join('')
       + days.map((x) => `<line x1="${X(x)}" x2="${X(x)}" y1="${T}" y2="${T + h}"/>`).join('');
     const ylab = [0, 0.5, 1].map((f) => `<text x="${L - 6}" y="${Y(ymax * f) + 3.5}" text-anchor="end">${nf.format(ymax * f)}</text>`).join('');
-    const xlab = days.map((x) => `<text x="${X(x + 43200)}" y="${H - 5}" text-anchor="middle">${fDay.format(new Date((x + 43200) * 1000))}</text>`).filter((_, k, a) => a.length < 9 || k % 2 === 0).join('');
+    const xlab = span < 2 * 86400
+      ? [0, 0.5, 1].map((f) => `<text x="${L + f * w}" y="${H - 5}" text-anchor="${f === 0 ? 'start' : f === 1 ? 'end' : 'middle'}">${fTime.format(new Date((ts + f * span) * 1000))}</text>`).join('')
+      : days.map((x) => `<text x="${X(x + 43200)}" y="${H - 5}" text-anchor="middle">${fDay.format(new Date((x + 43200) * 1000))}</text>`).filter((_, k, a) => a.length < 9 || k % 2 === 0).join('');
     const id = `c${++chartSeq}`;
-    chartData.set(id, { kind: 'time', t, values, X, L, w, color });
+    chartData.set(id, { kind: 'time', t, values, X, L, w });
     return `<div class="chart" data-chart="${id}"><div class="chart-title"><h2>${title}</h2><span>geschätzt</span></div>
       <svg viewBox="0 0 ${CW} ${H}" role="img" aria-label="${esc(title)}"><g class="grid">${grid}</g><g class="axis">${ylab}${xlab}</g>
       <path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round"/>
@@ -1386,18 +1549,18 @@
   }
 
   function barChart({ title, sub, values, labels, tickEvery, tickLabel, unitX }) {
-    if (!values.some((v) => v > 0)) return `<div class="chart"><div class="chart-title"><h2>${title}</h2></div><p class="hint">Noch keine Daten.</p></div>`;
-    const H = 130, L = 30, Rr = 6, T = 8, B = 22, w = CW - L - Rr, h = H - T - B;
+    if (!values.some((v) => v > 0)) return noData(title);
+    const H = 130, L = 32, Rr = 6, T = 8, B = 22, w = CW - L - Rr, h = H - T - B;
     const n = values.length, bw = w / n, ymax = niceMax(Math.max(...values) * 1.05);
     const Y = (v) => T + h - (v / ymax) * h;
     const bars = values.map((v, i) => {
       if (!v) return '';
-      const x = L + i * bw + 1, bwid = Math.max(1, bw - 2), y = Y(v), r = Math.min(3, bwid / 2, (T + h - y));
-      return `<path d="M${x},${T + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + bwid - r}Q${x + bwid},${y} ${x + bwid},${y + r}V${T + h}Z" fill="${C.station}"/>`;
+      const x = L + i * bw + 1, bwid = Math.max(1, bw - 2), y = Y(v), r = Math.min(3, bwid / 2, T + h - y);
+      return `<path d="M${x},${T + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + bwid - r}Q${x + bwid},${y} ${x + bwid},${y + r}V${T + h}Z" fill="${C.trip}"/>`;
     }).join('');
     const grid = [0, 0.5, 1].map((f) => `<line x1="${L}" x2="${L + w}" y1="${Y(ymax * f)}" y2="${Y(ymax * f)}"/>`).join('');
     const ylab = [0.5, 1].map((f) => `<text x="${L - 6}" y="${Y(ymax * f) + 3.5}" text-anchor="end">${nf.format(ymax * f)}</text>`).join('');
-    const xlab = values.map((_, i) => i % tickEvery === 0 && tickLabel(i) !== '' ? `<text x="${L + i * bw}" y="${H - 5}" text-anchor="middle">${tickLabel(i)}</text>` : '').join('')
+    const xlab = values.map((_, i) => (i % tickEvery === 0 && tickLabel(i) !== '' ? `<text x="${L + i * bw}" y="${H - 5}" text-anchor="${i === 0 ? 'start' : 'middle'}">${tickLabel(i)}</text>` : '')).join('')
       + `<text x="${L + w}" y="${H - 5}" text-anchor="end">${unitX}</text>`;
     const id = `c${++chartSeq}`;
     chartData.set(id, { kind: 'bar', values, labels, L, w, n });
@@ -1414,6 +1577,7 @@
       const svg = $('svg', el), d = chartData.get(el.dataset.chart);
       if (!d) continue;
       const xh = $('.xh', svg);
+      const hide = () => { $('#tip').hidden = true; if (xh) xh.setAttribute('visibility', 'hidden'); };
       const handler = (e) => {
         const r = svg.getBoundingClientRect();
         const x = ((e.clientX - r.left) / r.width) * CW;
@@ -1427,7 +1591,11 @@
           const tt = d.t[0] + ((x - d.L) / d.w) * (d.t[d.t.length - 1] - d.t[0]);
           let i = 0; for (let k = 0; k < d.t.length; k++) if (Math.abs(d.t[k] - tt) < Math.abs(d.t[i] - tt)) i = k;
           cx = d.X(d.t[i]);
-          html = `${fDate.format(new Date(d.t[i] * 1000))} ${fTime.format(new Date(d.t[i] * 1000))}: ${nf.format(d.values[i])} unterwegs`;
+          html = `${fmtWhen(d.t[i])}: ${nf.format(d.values[i])} unterwegs`;
+        } else if (d.kind === 'surv') {
+          let i = 0; for (let k = 0; k < d.xs.length; k++) if (Math.abs(d.X(d.xs[k]) - x) < Math.abs(d.X(d.xs[i]) - x)) i = k;
+          cx = d.X(d.xs[i]);
+          html = `${Math.round(d.share[i])} % stehen länger als ${fmtDur(d.xs[i])}`;
         } else {
           const i = Math.floor(((x - d.L) / d.w) * d.n);
           if (i < 0 || i >= d.n) return;
@@ -1436,133 +1604,146 @@
         if (xh) { xh.setAttribute('x1', cx); xh.setAttribute('x2', cx); xh.setAttribute('visibility', 'visible'); }
         const tip = $('#tip');
         tip.textContent = html; tip.hidden = false;
-        tip.style.left = `${Math.min(Math.max(e.clientX, 90), innerWidth - 90)}px`;
+        tip.style.left = `${Math.min(Math.max(e.clientX, 110), innerWidth - 110)}px`;
         tip.style.top = `${r.top + 4}px`;
         clearTimeout(tipTimer);
         if (e.pointerType !== 'mouse') tipTimer = setTimeout(hide, 2500);
       };
-      const hide = () => { $('#tip').hidden = true; if (xh) xh.setAttribute('visibility', 'hidden'); };
       svg.addEventListener('pointermove', handler);
       svg.addEventListener('pointerdown', handler);
       svg.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') hide(); });
     }
   }
 
-  // ---------------------------------------------------------------- events
+  // ================================================================ events
+  const nearestFrame = (t) => { const T = S.tl; let best = 0; for (let i = 0; i < T.t.length; i++) if (Math.abs(T.t[i] - t) < Math.abs(T.t[best] - t)) best = i; return best; };
+
+  async function reloadTimeline() {
+    stopPlay();
+    $('#tlRange').disabled = true;
+    try {
+      await ensureTimeline();
+      const end = $('#tlEnd');
+      end.min = firstDate(); end.max = lastDate(); end.value = S.k.end || lastDate();
+      if (S.k.end && S.k.end < lastDate()) { S.k.isLive = false; S.k.frame = S.tl.t.length - 1; }
+      setupScrubber(); renderKarte(true); updateStatus();
+    } catch (err) {
+      console.warn(err);
+      $('#tlDate').textContent = 'Live (noch kein Verlauf)';
+    }
+  }
+
   function bindUI() {
     $$('.modes button').forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
     $$('#aTabs button').forEach((b) => b.addEventListener('click', () => {
       S.tab = b.dataset.tab; closeDetail(true); setData('qpt', EMPTY); updateHash(); enterAnalysis();
       b.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: REDUCED ? 'auto' : 'smooth' });
     }));
-    for (const id of ['#liveLayers', '#tlLayers']) {
-      const mode = id === '#liveLayers' ? 'live' : 'verlauf';
-      $$(`${id} .chip`).forEach((c) => c.addEventListener('click', () => {
-        const k = c.dataset.layer, on = !S.layers[mode][k];
-        S.layers[mode][k] = on;
-        c.classList.toggle('on', on); c.setAttribute('aria-pressed', String(on));
-        applyVisibility();
-      }));
-    }
+    $$('#layers .chip').forEach((c) => c.addEventListener('click', () => {
+      const k = c.dataset.layer, on = !S.layers[k];
+      S.layers[k] = on;
+      c.classList.toggle('on', on); c.setAttribute('aria-pressed', String(on));
+      applyVisibility(); renderKarte();
+    }));
     $('#searchForm').addEventListener('submit', (e) => {
       e.preventDefault();
       const q = $('#searchInput').value.trim();
       if (!q) return;
       $('#searchInput').blur();
+      if (!S.k.isLive) goLive();
       if (S.live?.byId.has(q)) { $('#searchHint').textContent = ''; showBike(q); return; }
-      const T = S.tl;
-      $('#searchHint').textContent = `Rad ${q} ist gerade nicht im Feed, also vermutlich unterwegs oder in der Werkstatt.`;
-      if (T?.bikeIndex.has(q) || !T) {
-        $('#searchHint').innerHTML += ` <button class="btn sm ghost" data-act="trail" data-id="${esc(q)}">Im Verlauf suchen</button>`;
-      }
+      $('#searchHint').innerHTML = `Rad ${esc(q)} ist gerade nicht im Feed, also vermutlich unterwegs oder in der Werkstatt. <button class="btn sm ghost" data-act="trail" data-id="${esc(q)}">Im Verlauf suchen</button>`;
     });
     $('#btnNear').addEventListener('click', () => locate(false));
+    $('#btnLocate').addEventListener('click', () => locate(true));
+    $('#btnHome').addEventListener('click', () => map.fitBounds(KOELN, { padding: isDesktop() ? { left: 440, top: 40, right: 40, bottom: 40 } : { top: 40, left: 20, right: 20, bottom: sheetVisibleHeight() + 10 }, duration: REDUCED ? 0 : 600 }));
+    $('#repoLink').href = S.cfg?.repo || '#';
     const tabs = $('#aTabs');
     const tabEnd = () => tabs.classList.toggle('at-end', tabs.scrollLeft + tabs.clientWidth >= tabs.scrollWidth - 4);
     tabs.addEventListener('scroll', tabEnd, { passive: true }); addEventListener('resize', tabEnd); setTimeout(tabEnd, 500);
     $('#scroll').addEventListener('scroll', (e) => e.target.classList.toggle('scrolled', e.target.scrollTop > 2), { passive: true });
-    $('#btnLocate').addEventListener('click', () => locate(true));
-    $('#btnHome').addEventListener('click', () => map.fitBounds(KOELN, { padding: isDesktop() ? { left: 440, top: 40, right: 40, bottom: 40 } : { top: 40, left: 20, right: 20, bottom: sheetVisibleHeight() + 10 }, duration: REDUCED ? 0 : 600 }));
-    $('#repoLink').href = S.cfg?.repo || '#';
 
-    // timeline controls
-    $('#tlRange').addEventListener('input', (e) => { S.frame = +e.target.value; if (S.playing) stopPlay(); renderFrame(); });
-    $('#tlPlay').addEventListener('click', () => (S.playing ? stopPlay() : startPlay()));
+    // timeline
+    $('#tlRange').addEventListener('input', (e) => { stopPlay(); setFrame(+e.target.value); });
+    $('#tlPlay').addEventListener('click', () => (S.k.playing ? stopPlay() : startPlay()));
+    $('#tlLive').addEventListener('click', goLive);
     $('#tlSpeed').addEventListener('click', () => {
-      S.speed = S.speed === 1 ? 2 : S.speed === 2 ? 4 : 1;
-      $('#tlSpeed').textContent = `${S.speed}×`;
-      if (S.playing) startPlay();
+      S.k.speed = S.k.speed === 1 ? 2 : S.k.speed === 2 ? 4 : 1;
+      $('#tlSpeed').textContent = `${S.k.speed}×`;
     });
     $$('#tlSpan button').forEach((b) => b.addEventListener('click', () => {
-      S.span = +b.dataset.h;
+      S.k.span = +b.dataset.h;
       $$('#tlSpan button').forEach((x) => x.setAttribute('aria-checked', String(x === b)));
-      S.frame = -1;
-      if (S.mode === 'verlauf') enterTimeline();
+      reloadTimeline();
     }));
+    $('#tlEnd').addEventListener('change', (e) => { S.k.end = e.target.value || null; reloadTimeline(); });
     addEventListener('keydown', (e) => {
-      if (S.mode !== 'verlauf' || !S.tl || /input|textarea/i.test(document.activeElement?.tagName) && document.activeElement.type !== 'range') return;
-      if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
-        if (document.activeElement?.id === 'tlRange') return; // native handling
-        S.frame = Math.min(Math.max(S.frame + (e.key === 'ArrowRight' ? 1 : -1), +$('#tlRange').min), +$('#tlRange').max);
-        $('#tlRange').value = S.frame; renderFrame(); e.preventDefault();
-      } else if (e.key === ' ' && document.activeElement === document.body) { S.playing ? stopPlay() : startPlay(); e.preventDefault(); }
+      if (S.mode !== 'karte' || !S.tl) return;
+      const ae = document.activeElement;
+      if (/input|textarea|select/i.test(ae?.tagName) && ae.type !== 'range') return;
+      if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && ae?.id !== 'tlRange') {
+        const r = $('#tlRange');
+        const cur = S.k.isLive ? +r.max : S.k.frame;
+        const nx = Math.min(Math.max(cur + (e.key === 'ArrowRight' ? 1 : -1), +r.min), +r.max);
+        r.value = nx; stopPlay(); setFrame(nx); e.preventDefault();
+      } else if (e.key === ' ' && ae === document.body) { if (S.k.playing) stopPlay(); else startPlay(); e.preventDefault(); }
     });
 
-    // analysis controls
+    // analysis time window
     const onWin = (e) => { S.f[e.target.id === 'wA' ? 'a' : 'b'] = +e.target.value; stopWindowPlay(); syncFilterUI(); saveFilter(); scheduleCompute(180); };
     $('#wA').addEventListener('input', onWin);
     $('#wB').addEventListener('input', onWin);
     $('#wPlay').addEventListener('click', () => (S.wPlaying ? stopWindowPlay() : startWindowPlay()));
-    $('#fSummary').addEventListener('click', () => {
-      if (!isDesktop() && sheetState !== 'full') setSheet('full');
-      const el = $('#filters');
-      if (el) requestAnimationFrame(() => $('#scroll').scrollTo({ top: el.offsetTop - $('.mode[data-mode="analyse"] .peek').offsetHeight - 8, behavior: REDUCED ? 'auto' : 'smooth' }));
-    });
-    $('#tlEnd').addEventListener('change', (e) => { S.tlEnd = e.target.value || null; S.frame = -1; if (S.mode === 'verlauf') enterTimeline(); });
 
-    // delegated actions inside the panel
+    // delegated actions
     $('#panel').addEventListener('click', (e) => {
       const el = e.target.closest('[data-act]');
       if (!el) return;
       const a = el.dataset.act, id = el.dataset.id;
       if (a === 'close') closeDetail();
-      else if (a === 'bike') showBike(id);
+      else if (a === 'sheet') {
+        const open = sheetState === 'peek';
+        setSheet(open ? 'full' : 'peek');
+        if (!open) $('#scroll').scrollTo({ top: 0 });
+      }
+      else if (a === 'bike') { if (S.mode === 'karte' && !S.k.isLive) goLive(); showBike(id); }
       else if (a === 'station') showStation(id);
       else if (a === 'trail') showTrailFor(id);
       else if (a === 'tlbike') { const i = S.tl.bikeIndex.get(id); if (i != null) showTlBike(i); }
-      else if (a === 'livebike') { setMode('live'); showBike(id); }
+      else if (a === 'livebike') { goLive(); showBike(id); }
       else if (a === 'cleartrail') { S.trail = null; setData('trail', EMPTY); applyVisibility(); closeDetail(); }
-      else if (a === 'frame') { S.frame = nearestFrame(+el.dataset.t); $('#tlRange').value = S.frame; renderFrame(); }
+      else if (a === 'frame') { const i = nearestFrame(+el.dataset.t); $('#tlRange').value = i; setFrame(i); }
       else if (a === 'stq') stationQuery(id);
       else if (a === 'pointme' && S.me) {
-        if (S.mode !== 'analyse' || S.tab !== 'verfuegbarkeit') { S.tab = 'verfuegbarkeit'; setMode('analyse'); }
-        setTimeout(() => { pointQuery(S.me[0], S.me[1]); applyVisibility(); flyTo(S.me, 14.5); }, 50);
+        S.tab = 'erreichbarkeit';
+        if (S.mode !== 'analyse') setMode('analyse'); else enterAnalysis();
+        setTimeout(() => { pointQuery(S.me[0], S.me[1]); flyTo(S.me, 14.5); }, 60);
       }
       else if (a === 'clearpoint') { S.sel = null; setData('qpt', EMPTY); applyVisibility(); closeDetail(); }
+      else if (a === 'widen') { S.f.wd = [1, 1, 1, 1, 1, 1, 1]; S.f.a = 0; S.f.b = 96; S.f.range = 'all'; saveFilter(); enterAnalysis(); }
     });
     $('#near').addEventListener('click', (e) => { if (e.target.id === 'btnNear2') locate(false); });
 
     addEventListener('hashchange', () => { const m = S.mode, t = S.tab; readHash(); if (m !== S.mode) setMode(S.mode); else if (t !== S.tab) enterAnalysis(); });
     setInterval(updateStatus, 30000);
-    setInterval(() => { if (S.mode === 'live' && document.visibilityState === 'visible') loadLive(true); }, 5 * 60000);
-    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.live && now() - Date.parse(S.live.meta.ts) / 1000 > 16 * 60) loadLive(true); });
+    setInterval(() => { if (document.visibilityState === 'visible') loadLive(true); }, 5 * 60000);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.live && now() - S.live.t > 14 * 60) loadLive(true); });
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => location.reload());
   }
 
-  // ---------------------------------------------------------------- boot
-  let booted = false;
+  // ================================================================ boot
+  let booted = false, liveReady;
   async function boot() {
     if (booted) return; booted = true;
     await liveReady;
-    renderLive();
-    setMode(S.mode, { sheet: 'peek' });
     const bb = S.live?.meta?.bounds;
     const view = bb ? [[bb[1], bb[0]], [bb[3], bb[2]]] : KOELN;
+    setMode(S.mode, { sheet: 'peek' });
     requestAnimationFrame(() => map.fitBounds(view, { duration: 0, padding: isDesktop()
       ? { left: 440, top: 30, right: 30, bottom: 30 } : { top: 20, left: 12, right: 12, bottom: sheetVisibleHeight() + 8 } }));
+    reloadTimeline();
   }
 
-  let liveReady;
   async function start() {
     readHash();
     S.f = loadFilter();
@@ -1575,7 +1756,7 @@
     if (typeof maplibregl === 'undefined') { toast('Die Kartenbibliothek konnte nicht geladen werden. Bitte Seite neu laden.', 10000); return; }
     initMap(S.cfg);
   }
-  window.__app = S; // for debugging and screenshots
-  window.__ui = { setMode, setSheet, showStation, showBike, pointQuery, stationQuery, flyTo };
+  window.__app = S;
+  window.__ui = { setMode, setSheet, showStation, showBike, pointQuery, stationQuery, flyTo, setFrame, startPlay, stopPlay, goLive };
   start();
 })();

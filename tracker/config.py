@@ -89,7 +89,7 @@ class Config:
 
     # Analysis
     analysis_days: float = 56         # how many days of history the web app can load
-    timeline_step_minutes: float = 10 # min spacing of exported polls
+    timeline_step_minutes: float = 5  # min spacing of exported polls
     analysis_interval_minutes: float = 30  # serve mode: recompute at most this often
 
     # Server
@@ -123,7 +123,7 @@ class Config:
             web_style_light=_env("WEB_STYLE_LIGHT", cls.web_style_light),
             web_style_dark=_env("WEB_STYLE_DARK", cls.web_style_dark),
             analysis_days=float(_env("ANALYSIS_DAYS", "56")),
-            timeline_step_minutes=float(_env("TIMELINE_STEP_MINUTES", "10")),
+            timeline_step_minutes=float(_env("TIMELINE_STEP_MINUTES", "5")),
             analysis_interval_minutes=float(_env("ANALYSIS_INTERVAL_MINUTES", "30")),
             port=int(_env("PORT", "8080")),
         )

@@ -91,12 +91,32 @@ const kindOk = (kind, pl) => kind === 'all' || (kind === 'free' ? pl < 0 : pl >=
 const matches = (F, t) => { const p = info(t); return F.wd[p.wd] && inWindow(p.min, F.t0, F.t1); };
 
 // ------------------------------------------------------------------ rasters
-function grid(res) {
-  const W = Math.ceil(((BBOX.e - BBOX.w) * M_LNG) / res), H = Math.ceil(((BBOX.n - BBOX.s) * M_LAT) / res);
-  return { W, H, res, dlng: res / M_LNG, dlat: res / M_LAT };
+function grid(res, bb = BBOX) {
+  const W = Math.ceil(((bb.e - bb.w) * M_LNG) / res), H = Math.ceil(((bb.n - bb.s) * M_LAT) / res);
+  return { W, H, res, dlng: res / M_LNG, dlat: res / M_LAT, bb };
+}
+// where bikes actually are in the loaded days, plus ~1.2 km margin
+let activeBB = { key: '', bb: BBOX };
+function activeBBox(dates) {
+  const key = dates.join(',');
+  if (activeBB.key === key) return activeBB.bb;
+  const lats = [], lngs = [];
+  for (const d of dates) {
+    const day = DAYS.get(d); if (!day) continue;
+    const f = day.frames[0];
+    for (let k = 0; k < f.length; k += 4) { lats.push(day.lat0 + f[k + 1] / day.scale); lngs.push(day.lng0 + f[k + 2] / day.scale); }
+  }
+  if (lats.length < 10) return BBOX;
+  lats.sort((a, b) => a - b); lngs.sort((a, b) => a - b);
+  const q = (a, f) => a[Math.floor((a.length - 1) * f)];
+  const m = 1200;
+  const bb = { s: Math.max(BBOX.s, q(lats, 0.002) - m / M_LAT), n: Math.min(BBOX.n, q(lats, 0.998) + m / M_LAT),
+    w: Math.max(BBOX.w, q(lngs, 0.002) - m / M_LNG), e: Math.min(BBOX.e, q(lngs, 0.998) + m / M_LNG) };
+  activeBB = { key, bb };
+  return bb;
 }
 const cellOf = (g, lat, lng) => {
-  const x = Math.floor((lng - BBOX.w) / g.dlng), y = Math.floor((lat - BBOX.s) / g.dlat);
+  const x = Math.floor((lng - g.bb.w) / g.dlng), y = Math.floor((lat - g.bb.s) / g.dlat);
   return x < 0 || y < 0 || x >= g.W || y >= g.H ? -1 : y * g.W + x;
 };
 
@@ -186,7 +206,7 @@ function avail({ F, dates, R, res: want, stops }) {
 
 // average bikes per cell, smoothed (kernel density)
 function density({ F, dates, res, smooth, stops }) {
-  const g = grid(res);
+  const g = grid(res, activeBBox(dates));
   const NC = g.W * g.H, sum = new Float32Array(NC);
   let polls = 0;
   const seenDays = new Set();
@@ -210,7 +230,7 @@ function density({ F, dates, res, smooth, stops }) {
   const vmax = sorted.length ? sorted[Math.floor(sorted.length * 0.995)] : 1;
   const rgba = colorize(g, vals, vmax || 1, stops, true);
   for (let i = 0; i < NC; i++) if (vals[i] < vmax * 0.02) rgba[(((g.H - 1 - Math.floor(i / g.W)) * g.W) + (i % g.W)) * 4 + 3] = 0;
-  return { w: g.W, h: g.H, bbox: BBOX, rgba, polls, days: seenDays.size, res, vmax, vals };
+  return { w: g.W, h: g.H, bbox: g.bb, rgba, polls, days: seenDays.size, res, vmax, vals };
 }
 
 // exact profile for one location: chance / average count within R per 15 min
@@ -412,11 +432,114 @@ function inuseSeries({ dates, P }) {
   return { t: R.pollT, inuse: Array.from(R.inuse), total: R.pollTotal };
 }
 
+
+// ------------------------------------------------------------------ reach
+// Walking distance to the nearest bike: per poll a distance field (chamfer
+// transform on the raster), accumulated as a histogram per cell. From the
+// histogram we get the typical (median) distance and P(nearest <= R) for any
+// R without recomputing.
+const EDGES = [50, 100, 150, 200, 300, 400, 500, 750, 1000, 1500, 2000];
+let reachCache = { key: '', g: null, hist: null, polls: 0, days: 0, sampled: 0 };
+
+const BIN_LUT = (() => { const a = new Uint8Array(260); for (let i = 0; i < 260; i++) { let k = 0; while (k < EDGES.length && i * 10 > EDGES[k]) k++; a[i] = k; } return a; })();
+
+function reachCompute({ F, dates, res, maxPolls = 150 }) {
+  const key = `${JSON.stringify(F)}|${dates.join(',')}|${res}|${maxPolls}`;
+  if (reachCache.key === key) return reachCache;
+  const g = grid(res, activeBBox(dates)), NC = g.W * g.H, NB = EDGES.length + 1;
+  const hist = new Uint16Array(NC * NB);
+  const dist = new Float32Array(NC);
+  const CAP = 2500, D1 = res, D2 = res * Math.SQRT2;
+  // which polls: all matching, evenly sampled down to maxPolls
+  const match = [];
+  for (const d of dates) { const day = DAYS.get(d); if (day) for (const t of day.t) if (matches(F, t)) match.push(t); }
+  const step = Math.max(1, match.length / maxPolls);
+  const take = new Set();
+  for (let k = 0; k < match.length; k += step) take.add(match[Math.floor(k)]);
+  let polls = 0;
+  const seenDays = new Set();
+  replay(dates, (t, S, day) => {
+    if (!take.has(t)) return;
+    polls++; seenDays.add(day.date);
+    dist.fill(CAP);
+    for (let b = 0; b < S.n; b++) {
+      if (!S.p[b] || !kindOk(F.kind, S.pl[b])) continue;
+      const c = cellOf(g, S.lat[b], S.lng[b]);
+      if (c >= 0) dist[c] = 0;
+    }
+    const W = g.W, H = g.H;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x; let v = dist[i];
+      if (x > 0 && dist[i - 1] + D1 < v) v = dist[i - 1] + D1;
+      if (y > 0) {
+        const u = i - W;
+        if (dist[u] + D1 < v) v = dist[u] + D1;
+        if (x > 0 && dist[u - 1] + D2 < v) v = dist[u - 1] + D2;
+        if (x < W - 1 && dist[u + 1] + D2 < v) v = dist[u + 1] + D2;
+      }
+      dist[i] = v;
+    }
+    for (let y = H - 1; y >= 0; y--) for (let x = W - 1; x >= 0; x--) {
+      const i = y * W + x; let v = dist[i];
+      if (x < W - 1 && dist[i + 1] + D1 < v) v = dist[i + 1] + D1;
+      if (y < H - 1) {
+        const u = i + W;
+        if (dist[u] + D1 < v) v = dist[u] + D1;
+        if (x < W - 1 && dist[u + 1] + D2 < v) v = dist[u + 1] + D2;
+        if (x > 0 && dist[u - 1] + D2 < v) v = dist[u - 1] + D2;
+      }
+      dist[i] = v;
+    }
+    const half = res / 2;
+    for (let i = 0; i < NC; i++) {
+      const d = dist[i] + half; // distance from the cell centre, roughly
+      hist[i * NB + BIN_LUT[d >= 2590 ? 259 : (d / 10) | 0]]++;
+    }
+  });
+  reachCache = { key, g, hist, polls, days: seenDays.size, sampled: match.length };
+  return reachCache;
+}
+
+function reach({ F, dates, res, metric, R, stops }) {
+  const c = reachCompute({ F, dates, res });
+  const { g, hist, polls } = c, NC = g.W * g.H, NB = EDGES.length + 1;
+  const vals = new Float32Array(NC);
+  if (metric === 'prob') {
+    const kR = EDGES.indexOf(R) >= 0 ? EDGES.indexOf(R) : EDGES.findIndex((e) => e >= R);
+    for (let i = 0; i < NC; i++) {
+      let n = 0; for (let k = 0; k <= kR; k++) n += hist[i * NB + k];
+      vals[i] = polls ? (n * 100) / polls : 0;
+    }
+    const rgba = colorize(g, blur(g, vals, 0.8), 100, stops, true);
+    return { w: g.W, h: g.H, bbox: g.bb, rgba, vals, polls, days: c.days, sampled: c.sampled, res };
+  }
+  // median distance; colour by closeness so near = strong, far = fades out
+  const close = new Float32Array(NC);
+  for (let i = 0; i < NC; i++) {
+    if (!polls) { vals[i] = -1; continue; }
+    let acc = 0, k = 0;
+    while (k < NB && acc + hist[i * NB + k] < polls / 2) { acc += hist[i * NB + k]; k++; }
+    const lo = k === 0 ? 0 : EDGES[k - 1], hi = k < EDGES.length ? EDGES[k] : 2500;
+    const inBin = hist[i * NB + k] || 1;
+    const med = lo + ((polls / 2 - acc) / inBin) * (hi - lo);
+    vals[i] = med;
+    close[i] = med >= 1500 ? 0 : Math.max(0, 1 - Math.log(med / 25) / Math.log(1500 / 25));
+  }
+  const rgba = colorize(g, blur(g, close, 0.8), 1, stops, true);
+  return { w: g.W, h: g.H, bbox: g.bb, rgba, vals, polls, days: c.days, sampled: c.sampled, res };
+}
+
+// all inferred trips of the given days (for the animated map)
+function tripsList({ dates, P }) {
+  const R = inferTrips(dates, P);
+  return { trips: R.trips.slice(), pollT: R.pollT, inuse: Array.from(R.inuse) };
+}
+
 // ------------------------------------------------------------------ rpc
 const OPS = {
   async init({ base }) { BASE = base; return true; },
   async load({ dates }) { for (const d of dates) await loadDay(d); return { bikes: G.bikeIds.length, stations: G.st.length }; },
-  avail, density, point, stations, stationProfile, usage, flows, inuseSeries,
+  avail, density, point, stations, stationProfile, usage, flows, inuseSeries, reach, tripsList,
 };
 self.onmessage = async (e) => {
   const { id, op, args } = e.data;
@@ -424,8 +547,7 @@ self.onmessage = async (e) => {
     if (args && args.dates) for (const d of args.dates) await loadDay(d);
     const res = await OPS[op](args || {});
     const transfer = [];
-    if (res && res.rgba) transfer.push(res.rgba.buffer);
-    if (res && res.vals) transfer.push(res.vals.buffer);
+    for (const k of ['rgba', 'vals', 'trips']) if (res && res[k] && res[k].buffer instanceof ArrayBuffer) transfer.push(res[k].buffer);
     self.postMessage({ id, ok: true, res }, transfer);
   } catch (err) {
     self.postMessage({ id, ok: false, err: String(err && err.stack || err) });

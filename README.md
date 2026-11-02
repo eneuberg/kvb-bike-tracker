@@ -4,11 +4,10 @@ Tracks every KVB-Rad bike in Köln via the public nextbike live API. It draws a 
 
 **Interactive map:** https://eneuberg.github.io/kvb-bike-tracker/
 
-| Mode | What it shows |
+| View | What it shows |
 |---|---|
-| **Live** | All bikes right now: stations (count = bikes docked), free-floating bikes, optional density layer. Tap a bike for details and "untouched since", tap a station for its typical fill level. Search by bike number, nearest bikes from your location. |
-| **Verlauf** | Scrub or play through the last 7 days (10-min steps). The curve behind the slider is the estimated number of bikes in use. "Weg anzeigen" draws where a single bike stood over the days. |
-| **Analyse** | Everything is computed in your browser from the raw history, so all parameters are free: date range, any weekdays, any time window (also across midnight), plus per view: *Verfügbarkeit* (chance of at least one bike within a chosen radius, tap anywhere for an exact profile of that spot), *Dichte* (average parked bikes per hectare, adjustable smoothing), *Nutzung* (bikes in use, trips per hour, duration and distance; trip-detection thresholds adjustable), *Ströme* (net in/outflow and top connections; area size, count, minimum adjustable), *Stationen* (chance a station has at most *k* bikes), *Standzeit* (bikes untouched for at least *n* days). |
+| **Karte** | One timeline from the past up to *now* (the right end is live). Stations with counts, free-floating bikes, optional density, and estimated trips as dots travelling from start to destination. Press play to watch where bikes flow; tap a bike for details, "untouched since" and its path over the last days. |
+| **Analyse** | Computed in your browser from the raw history, with free filters (date range, weekdays, time window incl. across midnight) and per-view parameters. *Erreichbarkeit*: typical walking distance to the nearest bike (50 m raster) or chance of a bike within a chosen radius; tap anywhere for an exact profile. *Dichte*: average parked bikes per hectare. *Ströme*: most frequent connections with animated direction, net in/outflow per area (area size adjustable). *Nutzung*: bikes in use, trips per hour, duration, distance. *Stationen*: typical fill level and chance of being empty. *Standzeit*: how long bikes stand untouched, minutes to days. Each view explains how it is computed. |
 
 The map uses MapLibre GL with [OpenFreeMap](https://openfreemap.org) vector tiles (free, no key), so markers and heatmaps scale smoothly while zooming. It works on phones (bottom sheet) and desktop (side panel), in light and dark mode.
 
@@ -74,14 +73,14 @@ In Coolify: **New Resource → Docker Compose → this repo**, assign a domain t
 
 | env var | default | description |
 |---|---|---|
-| `UPDATE_INTERVAL_MINUTES` | `15` | poll interval in minutes (fractions allowed, minimum 1) |
+| `UPDATE_INTERVAL_MINUTES` | `13` | poll interval in minutes (fractions allowed, minimum 1); 13 is prime, so it doesn't lock onto hourly patterns |
 | `NEXTBIKE_DOMAIN` | `kg` | nextbike network ID (`kg` = KVB-Rad Köln) |
 | `NEXTBIKE_CITY_ID` | – | restrict to one nextbike city UID instead |
 | `MOVE_THRESHOLD_M` | `25` | movement threshold for `moved` events |
 | `RENDER_PNG` | `true` | render `map.png` / `heatmap.png` on each update |
 | `TILE_API_KEY` | – | free [CARTO basemap key](https://carto.com/basemaps/apikey) for the PNG renders; see *Basemap* below |
 | `ANALYSIS_DAYS` | `56` | how many days of history the web app can load (Verlauf and Analyse) |
-| `TIMELINE_STEP_MINUTES` | `10` | minimum spacing of exported polls (matters for 1-minute polling) |
+| `TIMELINE_STEP_MINUTES` | `5` | minimum spacing of exported polls (matters for 1-minute polling) |
 | `ANALYSIS_INTERVAL_MINUTES` | `30` | container only: re-export the history at most this often |
 
 The container serves `/` (interactive map), `/map.png`, `/heatmap.png`, `/latest.json` (current state) and `/history/` (all CSVs).

@@ -37,31 +37,59 @@
       </div>
     </div>
     <nav class="modes" role="tablist" aria-label="Ansicht">
-      <button role="tab" data-mode="live" aria-selected="true">Live</button>
-      <button role="tab" data-mode="verlauf" aria-selected="false">Verlauf</button>
+      <button role="tab" data-mode="karte" aria-selected="true">Karte</button>
       <button role="tab" data-mode="analyse" aria-selected="false">Analyse</button>
     </nav>
   </header>
 
   <div class="scroll" id="scroll">
-    <!-- LIVE ----------------------------------------------------------- -->
-    <section class="mode" data-mode="live">
+    <!-- KARTE: live + history on one timeline -------------------------- -->
+    <section class="mode" data-mode="karte">
       <div class="peek">
-        <div class="stats" id="liveStats">
-          <div class="stat"><b id="sTotal">–</b><span>Räder</span></div>
-          <div class="stat st"><b id="sStation">–</b><span>an Stationen</span></div>
-          <div class="stat fr"><b id="sFree">–</b><span>frei abgestellt</span></div>
+        <div class="scrub" id="scrub">
+          <div class="scrub-top">
+            <button class="play" id="tlPlay" type="button" aria-label="Abspielen">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-play" d="M8 5.5v13l11-6.5z"/><path class="i-pause" d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>
+            </button>
+            <div class="clock"><b id="tlTime">--:--</b><span id="tlDate">lädt …</span></div>
+            <button class="speed" id="tlSpeed" type="button" aria-label="Geschwindigkeit">1×</button>
+            <button class="livebtn" id="tlLive" type="button" aria-pressed="true"><span class="dot"></span>Live</button>
+          </div>
+          <div class="track">
+            <svg id="tlSpark" class="spark" preserveAspectRatio="none" aria-hidden="true"></svg>
+            <input type="range" id="tlRange" min="0" max="0" value="0" step="1" aria-label="Zeitpunkt" disabled>
+          </div>
+          <div class="ticks" id="tlTicks" aria-hidden="true"></div>
         </div>
+        <div class="stats small" id="kStats">
+          <div class="stat"><b id="sTotal">–</b><span>Räder</span></div>
+          <div class="stat st"><b id="sStation">–</b><span>Station</span></div>
+          <div class="stat fr"><b id="sFree">–</b><span>frei</span></div>
+          <div class="stat tr"><b id="sUse">–</b><span>unterwegs</span></div>
+        </div>
+        <button class="more-toggle" type="button" data-act="sheet"><span>Ebenen, Suche, Zeitraum</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg></button>
       </div>
       <div class="detail" id="detail" hidden></div>
       <div class="more">
         <div class="block">
           <h2>Ebenen</h2>
-          <div class="chips" id="liveLayers">
+          <div class="chips" id="layers">
             <button class="chip on" data-layer="stations" aria-pressed="true"><i class="sw st"></i>Stationen</button>
             <button class="chip on" data-layer="free" aria-pressed="true"><i class="sw fr"></i>Freie Räder</button>
+            <button class="chip on" data-layer="trips" aria-pressed="true"><i class="sw tr"></i>Fahrten</button>
             <button class="chip" data-layer="heat" aria-pressed="false"><i class="sw ht"></i>Dichte</button>
           </div>
+          <p class="hint">Fahrten: Räder, die aus dem Feed verschwinden und woanders wieder auftauchen, als wandernder Punkt vom Start zum Ziel. Beim Abspielen siehst du, wohin die Räder gerade fließen.</p>
+        </div>
+        <div class="block">
+          <h2>Zeitraum der Zeitleiste</h2>
+          <div class="seg" id="tlSpan" role="radiogroup" aria-label="Zeitraum">
+            <button role="radio" data-h="6" aria-checked="false">6 h</button>
+            <button role="radio" data-h="24" aria-checked="true">24 h</button>
+            <button role="radio" data-h="72" aria-checked="false">3 Tage</button>
+            <button role="radio" data-h="168" aria-checked="false">7 Tage</button>
+          </div>
+          <label class="field">bis einschließlich <input type="date" id="tlEnd"></label>
         </div>
         <div class="block">
           <h2>Rad suchen</h2>
@@ -74,83 +102,34 @@
         <div class="block">
           <h2>In deiner Nähe</h2>
           <div id="near"><button class="btn-wide" id="btnNear" type="button">Standort verwenden</button>
-          <p class="hint">Zeigt die nächsten Räder und wie oft um diese Uhrzeit eins in der Nähe steht.</p></div>
+          <p class="hint">Zeigt die nächsten Räder und wie weit du hier normalerweise laufen musst.</p></div>
         </div>
         <div class="block about">
-          <p>Daten: öffentliche Live-Schnittstelle von nextbike (KVB-Rad). Aktualisierung alle 15 Minuten. Räder in Benutzung sind im Feed nicht sichtbar.</p>
+          <p>* „unterwegs“ ist geschätzt: Räder, die aus dem Feed verschwinden und später woanders auftauchen. Räder in Benutzung sind im Feed selbst nicht sichtbar.</p>
+          <p>Daten: öffentliche Live-Schnittstelle von nextbike (KVB-Rad), etwa alle 13 Minuten abgefragt.</p>
           <p><a href="history/">Rohdaten (CSV)</a> <a id="repoLink" href="#">Quellcode</a></p>
         </div>
       </div>
     </section>
 
-    <!-- VERLAUF -------------------------------------------------------- -->
-    <section class="mode" data-mode="verlauf" hidden>
-      <div class="peek">
-        <div class="scrub" id="scrub">
-          <div class="scrub-top">
-            <button class="play" id="tlPlay" type="button" aria-label="Abspielen">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-play" d="M8 5.5v13l11-6.5z"/><path class="i-pause" d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>
-            </button>
-            <div class="clock"><b id="tlTime">--:--</b><span id="tlDate">–</span></div>
-            <button class="speed" id="tlSpeed" type="button" aria-label="Geschwindigkeit">1×</button>
-          </div>
-          <div class="track">
-            <svg id="tlSpark" class="spark" preserveAspectRatio="none" aria-hidden="true"></svg>
-            <input type="range" id="tlRange" min="0" max="0" value="0" step="1" aria-label="Zeitpunkt">
-          </div>
-          <div class="ticks" id="tlTicks" aria-hidden="true"></div>
-        </div>
-      </div>
-      <div class="detail" id="detailTl" hidden></div>
-      <div class="more">
-        <div class="block">
-          <h2>Zeitraum</h2>
-          <div class="seg" id="tlSpan" role="radiogroup" aria-label="Zeitraum">
-            <button role="radio" data-h="24" aria-checked="false">24 h</button>
-            <button role="radio" data-h="72" aria-checked="false">3 Tage</button>
-            <button role="radio" data-h="168" aria-checked="true">7 Tage</button>
-            <button role="radio" data-h="336" aria-checked="false">14 Tage</button>
-          </div>
-          <label class="field">bis einschließlich <input type="date" id="tlEnd"></label>
-        </div>
-        <div class="block">
-          <div class="stats small">
-            <div class="stat"><b id="tTotal">–</b><span>im Feed</span></div>
-            <div class="stat st"><b id="tStation">–</b><span>an Stationen</span></div>
-            <div class="stat fr"><b id="tFree">–</b><span>frei</span></div>
-            <div class="stat"><b id="tUse">–</b><span>unterwegs*</span></div>
-          </div>
-          <p class="hint">* geschätzt aus Rädern, die aus dem Feed verschwinden und woanders wieder auftauchen. Die Kurve über dem Regler zeigt diesen Wert.</p>
-        </div>
-        <div class="block">
-          <h2>Ebenen</h2>
-          <div class="chips" id="tlLayers">
-            <button class="chip on" data-layer="stations" aria-pressed="true"><i class="sw st"></i>Stationen</button>
-            <button class="chip on" data-layer="free" aria-pressed="true"><i class="sw fr"></i>Freie Räder</button>
-            <button class="chip" data-layer="heat" aria-pressed="false"><i class="sw ht"></i>Dichte</button>
-          </div>
-        </div>
-        <p class="hint">Tipp: Rad antippen und „Weg anzeigen“ wählen, um zu sehen, wo es in den letzten Tagen stand. Pfeiltasten springen einen Schritt.</p>
-      </div>
-    </section>
-
-    <!-- ANALYSE -------------------------------------------------------- -->
+    <!-- ANALYSE --------------------------------------------------------- -->
     <section class="mode" data-mode="analyse" hidden>
       <div class="peek">
         <div class="tabs" id="aTabs" role="tablist" aria-label="Auswertung">
-          <button role="tab" data-tab="verfuegbarkeit" aria-selected="true">Verfügbarkeit</button>
+          <button role="tab" data-tab="erreichbarkeit" aria-selected="true">Erreichbarkeit</button>
           <button role="tab" data-tab="dichte" aria-selected="false">Dichte</button>
-          <button role="tab" data-tab="nutzung" aria-selected="false">Nutzung</button>
           <button role="tab" data-tab="stroeme" aria-selected="false">Ströme</button>
+          <button role="tab" data-tab="nutzung" aria-selected="false">Nutzung</button>
           <button role="tab" data-tab="stationen" aria-selected="false">Stationen</button>
           <button role="tab" data-tab="standzeit" aria-selected="false">Standzeit</button>
         </div>
+        <p class="lead" id="aLead"></p>
         <div class="timebar" id="timeBar">
           <button class="play" id="wPlay" type="button" aria-label="Zeitfenster durch den Tag laufen lassen">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-play" d="M8 5.5v13l11-6.5z"/><path class="i-pause" d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>
           </button>
           <div class="tw-main">
-            <div class="tw-label"><b id="wLabel">08:00–09:00</b><span id="wDays">Mo–Fr</span></div>
+            <div class="tw-label"><b id="wLabel">08:00–09:00</b><span id="wDays">alle Tage</span></div>
             <div class="dual" id="wDual">
               <div class="dual-fill" id="wFill"></div>
               <input type="range" id="wA" min="0" max="96" step="1" value="32" aria-label="Zeitfenster Beginn">
@@ -159,8 +138,8 @@
             <div class="ticks hours" aria-hidden="true"><span>0</span><span>6</span><span>12</span><span>18</span><span>24</span></div>
           </div>
         </div>
-        <button class="fsum" id="fSummary" type="button"><span id="fSumText">Filter</span><b>Filter ändern</b></button>
         <div class="legend" id="aLegend"></div>
+        <button class="more-toggle" type="button" data-act="sheet"><span id="fSumText">Filter und Erklärung</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg></button>
       </div>
       <div class="detail" id="detailA" hidden></div>
       <div class="more" id="aMore"></div>

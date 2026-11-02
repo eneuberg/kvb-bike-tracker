@@ -24,30 +24,30 @@ MID_FRAME = """() => { const r = document.querySelector('#tlRange'); r.value = M
   r.dispatchEvent(new Event('input')); }"""
 HALF = "() => window.__ui.setSheet('half')"
 POINT = "() => window.__ui.pointQuery(6.9583, 50.9413)"
-FILTER_OPEN = "() => document.querySelector('#fSummary').click()"
-PREP = """() => { localStorage.setItem('kvb-filter', JSON.stringify({ range: 'all', wd: [1,1,1,1,1,1,1], a: 0, b: 96 })); }"""
+FILTER_OPEN = "() => document.querySelector('.mode:not([hidden]) .more-toggle').click()"
+PLAY = "() => { const T = window.__app.tl; if (T) { window.__ui.setFrame(Math.max(T.i0, T.t.length - 6)); window.__ui.startPlay(); } }"
+PREP = """() => { localStorage.setItem('kvb-filter-v3', JSON.stringify({ range: 'all', wd: [1,1,1,1,1,1,1], a: 0, b: 96 })); }"""
 FULL = "() => window.__ui.setSheet('full')"
 
 SHOTS = [
-    ("phone-live", PHONE, "#live", []),
-    ("phone-live-station", PHONE, "#live", [PICK_STATION]),
-    ("phone-live-bike", PHONE, "#live", [PICK_BIKE]),
-    ("phone-verlauf", PHONE, "#verlauf", [MID_FRAME]),
-    ("phone-verlauf-half", PHONE, "#verlauf", [MID_FRAME, HALF]),
-    ("phone-verfuegbarkeit", PHONE, "#analyse/verfuegbarkeit", []),
-    ("phone-verfuegbarkeit-punkt", PHONE, "#analyse/verfuegbarkeit", [POINT]),
-    ("phone-filter", PHONE, "#analyse/verfuegbarkeit", [FILTER_OPEN]),
+    ("phone-karte", PHONE, "#karte", []),
+    ("phone-karte-station", PHONE, "#karte", [PICK_STATION]),
+    ("phone-karte-play", PHONE, "#karte", [PLAY]),
+    ("phone-karte-mehr", PHONE, "#karte", [FILTER_OPEN]),
+    ("phone-erreichbarkeit", PHONE, "#analyse/erreichbarkeit", []),
+    ("phone-erreichbarkeit-punkt", PHONE, "#analyse/erreichbarkeit", [POINT]),
+    ("phone-filter", PHONE, "#analyse/erreichbarkeit", [FILTER_OPEN]),
     ("phone-dichte", PHONE, "#analyse/dichte", []),
-    ("phone-nutzung", PHONE, "#analyse/nutzung", [FULL]),
     ("phone-stroeme", PHONE, "#analyse/stroeme", []),
+    ("phone-nutzung", PHONE, "#analyse/nutzung", [FULL]),
     ("phone-stationen", PHONE, "#analyse/stationen", []),
-    ("phone-standzeit", PHONE, "#analyse/standzeit", []),
-    ("phone-dark-live", {**PHONE, "color_scheme": "dark"}, "#live", []),
-    ("desktop-live", DESK, "#live", [PICK_STATION]),
-    ("desktop-verlauf", DESK, "#verlauf", [MID_FRAME]),
-    ("desktop-verfuegbarkeit", DESK, "#analyse/verfuegbarkeit", []),
-    ("desktop-nutzung", DESK, "#analyse/nutzung", []),
+    ("phone-standzeit", PHONE, "#analyse/standzeit", [FULL]),
+    ("phone-dark-karte", {**PHONE, "color_scheme": "dark"}, "#karte", []),
+    ("phone-dark-erreichbarkeit", {**PHONE, "color_scheme": "dark"}, "#analyse/erreichbarkeit", []),
+    ("desktop-karte", DESK, "#karte", [PICK_STATION]),
+    ("desktop-erreichbarkeit", DESK, "#analyse/erreichbarkeit", [POINT]),
     ("desktop-stroeme", DESK, "#analyse/stroeme", []),
+    ("desktop-nutzung", DESK, "#analyse/nutzung", []),
     ("desktop-dark-dichte", {**DESK, "color_scheme": "dark"}, "#analyse/dichte", []),
 ]
 
