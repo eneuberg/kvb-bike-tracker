@@ -265,6 +265,14 @@ input.slider::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; 
 .legend .cap { line-height: 1.35; }
 .legend .bar { height: 10px; border-radius: 5px; }
 .legend .scale { display: flex; justify-content: space-between; margin-top: 4px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.steps { display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; gap: 3px; }
+.steps div { min-width: 0; text-align: center; }
+.steps i { display: block; height: 12px; border-radius: 3px; }
+.steps div:first-child i { border-radius: 6px 3px 3px 6px; }
+.steps div:last-child i { border-radius: 3px 6px 6px 3px; }
+.steps span { display: block; margin-top: 4px; font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.steps small { display: block; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.legend-note { margin-top: 6px; font-size: 12px; }
 .legend .scale.log { position: relative; display: block; height: 16px; }
 .legend .scale.log span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
 .legend .scale.log span:first-child { transform: none; }

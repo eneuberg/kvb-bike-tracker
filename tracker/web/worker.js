@@ -438,10 +438,10 @@ function inuseSeries({ dates, P }) {
 // transform on the raster), accumulated as a histogram per cell. From the
 // histogram we get the typical (median) distance and P(nearest <= R) for any
 // R without recomputing.
-const EDGES = [50, 100, 150, 200, 300, 400, 500, 750, 1000, 1500, 2000];
+const EDGES = [25, 50, 75, 100, 125, 150, 200, 250, 300, 400, 500, 600, 700, 850, 1000, 1250, 1500, 2000];
 let reachCache = { key: '', g: null, hist: null, polls: 0, days: 0, sampled: 0 };
 
-const BIN_LUT = (() => { const a = new Uint8Array(260); for (let i = 0; i < 260; i++) { let k = 0; while (k < EDGES.length && i * 10 > EDGES[k]) k++; a[i] = k; } return a; })();
+const BIN_LUT = (() => { const a = new Uint8Array(260); for (let i = 0; i < 260; i++) { let k = 0; while (k < EDGES.length && i * 10 + 5 > EDGES[k]) k++; a[i] = k; } return a; })();
 
 function reachCompute({ F, dates, res, maxPolls = 150 }) {
   const key = `${JSON.stringify(F)}|${dates.join(',')}|${res}|${maxPolls}`;
@@ -500,7 +500,23 @@ function reachCompute({ F, dates, res, maxPolls = 150 }) {
   return reachCache;
 }
 
-function reach({ F, dates, res, metric, R, stops }) {
+// stepped colours: classes = [[upTo, r, g, b, alpha], ...] in ascending order
+function classify(g, vals, classes, transparentIf) {
+  const out = new Uint8ClampedArray(g.W * g.H * 4);
+  for (let y = 0; y < g.H; y++) {
+    const row = (g.H - 1 - y) * g.W;
+    for (let x = 0; x < g.W; x++) {
+      const v = vals[y * g.W + x];
+      if (transparentIf(v)) continue;
+      let k = 0; while (k < classes.length - 1 && v > classes[k][0]) k++;
+      const c = classes[k], o = (row + x) * 4;
+      out[o] = c[1]; out[o + 1] = c[2]; out[o + 2] = c[3]; out[o + 3] = 255 * c[4];
+    }
+  }
+  return out;
+}
+
+function reach({ F, dates, res, metric, R, classes }) {
   const c = reachCompute({ F, dates, res });
   const { g, hist, polls } = c, NC = g.W * g.H, NB = EDGES.length + 1;
   const vals = new Float32Array(NC);
@@ -510,22 +526,21 @@ function reach({ F, dates, res, metric, R, stops }) {
       let n = 0; for (let k = 0; k <= kR; k++) n += hist[i * NB + k];
       vals[i] = polls ? (n * 100) / polls : 0;
     }
-    const rgba = colorize(g, blur(g, vals, 0.8), 100, stops, true);
+    const shown = blur(g, vals, 0.8);
+    const rgba = classify(g, shown, classes, (v) => v < 1);
     return { w: g.W, h: g.H, bbox: g.bb, rgba, vals, polls, days: c.days, sampled: c.sampled, res };
   }
-  // median distance; colour by closeness so near = strong, far = fades out
-  const close = new Float32Array(NC);
+  // median distance across the sampled polls, interpolated inside its bin
   for (let i = 0; i < NC; i++) {
     if (!polls) { vals[i] = -1; continue; }
     let acc = 0, k = 0;
     while (k < NB && acc + hist[i * NB + k] < polls / 2) { acc += hist[i * NB + k]; k++; }
     const lo = k === 0 ? 0 : EDGES[k - 1], hi = k < EDGES.length ? EDGES[k] : 2500;
     const inBin = hist[i * NB + k] || 1;
-    const med = lo + ((polls / 2 - acc) / inBin) * (hi - lo);
-    vals[i] = med;
-    close[i] = med >= 1500 ? 0 : Math.max(0, 1 - Math.log(med / 25) / Math.log(1500 / 25));
+    vals[i] = lo + ((polls / 2 - acc) / inBin) * (hi - lo);
   }
-  const rgba = colorize(g, blur(g, close, 0.8), 1, stops, true);
+  const shown = blur(g, vals, 0.8);
+  const rgba = classify(g, shown, classes, (v) => v < 0 || v > classes[classes.length - 1][0]);
   return { w: g.W, h: g.H, bbox: g.bb, rgba, vals, polls, days: c.days, sampled: c.sampled, res };
 }
 

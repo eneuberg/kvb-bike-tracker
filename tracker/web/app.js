@@ -68,6 +68,17 @@
     idle: ['#d5cffb', '#a99ff5', '#7a6cf0', '#5240d0', '#2f2580'],
   };
   const gradient = (cols) => `linear-gradient(90deg, ${cols.join(', ')})`;
+  // stepped scale for Erreichbarkeit: near = indigo ... far = red. Checked for
+  // colour-vision deficiency (adjacent steps stay apart in light and dark mode).
+  const STEPS = ['#30219a', '#2a6fd6', '#17b2a6', '#f0cf3c', '#f28a2a', '#c42b4a'];
+  const rgb = (h) => { const n = parseInt(h.slice(1), 16); return [(n >> 16) & 255, (n >> 8) & 255, n & 255]; };
+  const DIST_CLASSES = [[75, '75 m', '1'], [150, '150 m', '2'], [250, '250 m', '3'], [400, '400 m', '5'], [700, '700 m', '9'], [1200, '1,2 km', '15']];
+  const PROB_CLASSES = [[20, '< 20 %'], [40, '20–40'], [60, '40–60'], [80, '60–80'], [95, '80–95'], [100, '≥ 95 %']];
+  const distClasses = () => DIST_CLASSES.map(([up], k) => [up, ...rgb(STEPS[k]), 0.82 - k * 0.06]);
+  const probClasses = () => PROB_CLASSES.map(([up], k) => [up, ...rgb(STEPS[5 - k]), 0.52 + k * 0.06]);
+  function stepLegend(colors, labels, sub) {
+    return `<div class="steps">${colors.map((c, k) => `<div><i style="background:${c}"></i><span>${labels[k]}</span>${sub ? `<small>${sub[k]}</small>` : ''}</div>`).join('')}</div>`;
+  }
   function hexA(hex, a) {
     const h = hex.replace('#', '');
     const n = parseInt(h.length === 3 ? h.split('').map((c) => c + c).join('') : h, 16);
@@ -932,15 +943,18 @@
   const TABS = {
     erreichbarkeit: {
       lead: 'Wie weit läufst du zum nächsten Rad?',
-      how: `<p>Für jede Abfrage im Filter wird für jedes 50-m-Feld die Luftlinie zum nächsten abgestellten Rad bestimmt.</p>
-        <ul><li><b>Laufweg</b>: der typische Wert (Median). In der Hälfte der Abfragen stand ein Rad näher, in der anderen weiter weg.</li>
-        <li><b>Chance im Umkreis</b>: in wie viel Prozent der Abfragen mindestens ein Rad innerhalb des gewählten Umkreises stand.</li></ul>
-        <p>Tippen auf die Karte rechnet exakt für diesen Ort, mit Tagesverlauf. Bei vielen Abfragen wird eine gleichmäßig verteilte Stichprobe von 150 genutzt.</p>`,
+      how: `<p><b>Pro Abfrage:</b> Für jedes Feld der Karte (50 × 50 m) wird die Luftlinie zum nächsten abgestellten Rad bestimmt. Das ist ein Schnappschuss: „Wenn ich um 08:13 hier gestanden hätte, wie weit wäre das nächste Rad gewesen?“</p>
+        <p><b>Über den Zeitraum:</b> Für jedes Feld werden diese Abstände aus allen Abfragen im Filter gesammelt. Gezeigt wird nicht der Mittelwert, sondern der <b>Median</b>: In der Hälfte der Abfragen war ein Rad näher, in der anderen Hälfte weiter weg. Der Median ist robust gegen seltene Ausreißer (etwa ein einzelner Moment, in dem alle Räder in der Nähe gerade unterwegs waren), die einen Mittelwert stark verzerren würden. Jede Abfrage zählt gleich viel. Bei mehr als 150 passenden Abfragen wird eine gleichmäßig über den Zeitraum verteilte Stichprobe von 150 genutzt.</p>
+        <p><b>Chance im Umkreis</b> nutzt dieselben Abstände: der Anteil der Abfragen, in denen der Abstand höchstens so groß war wie der gewählte Umkreis.</p>
+        <p><b>Grenzen:</b> Luftlinie, nicht Fußweg (der echte Weg ist meist ein Viertel bis ein Drittel länger). Genauigkeit etwa ±25 m durch das Raster. Tippen auf die Karte rechnet für genau diesen Punkt ohne Raster.</p>`,
     },
     dichte: {
       lead: 'Wo stehen im Schnitt die meisten Räder?',
-      how: `<p>Pro Abfrage werden die abgestellten Räder je Feld gezählt, über alle Abfragen im Filter gemittelt und leicht geglättet. Einheit: Räder pro Hektar (100 × 100 m).</p>
-        <p><b>Unterschied zur Erreichbarkeit:</b> Dichte zählt Räder, Erreichbarkeit misst den Weg zum nächsten. Ein einzelnes Rad an einer Ecke macht die Erreichbarkeit gut, die Dichte bleibt gering. Große Stationen und Hotspots fallen nur bei der Dichte auf.</p>`,
+      how: `<p>Pro Abfrage werden die abgestellten Räder je Feld gezählt, über alle Abfragen im Filter gemittelt (hier wirklich der Mittelwert) und leicht geglättet. Einheit: Räder pro Hektar (100 × 100 m).</p>
+        <p><b>Unterschied zur Erreichbarkeit:</b> Dichte fragt „wie viele?“, Erreichbarkeit „wie weit bis zum ersten?“. In der dichten Innenstadt sehen beide ähnlich aus. Auseinander gehen sie hier:</p>
+        <ul><li>Eine Station mit 20 Rädern ist bei der Dichte ein heller Fleck, bei der Erreichbarkeit nur gut im Umkreis von wenigen hundert Metern.</li>
+        <li>Ein Viertel mit einem Rad alle 150 m hat kaum Dichte, aber gute Erreichbarkeit.</li></ul>
+        <p>Für „finde ich hier ein Rad?“ ist die Erreichbarkeit die richtige Ansicht. Die Dichte zeigt, wo sich die Flotte sammelt.</p>`,
     },
     stroeme: {
       lead: 'Wohin fahren die Räder?',
@@ -1005,7 +1019,7 @@
   }
   const kindSeg = () => seg('kind', 'Welche Räder', [['all', 'Alle'], ['free', 'Frei'], ['station', 'An Station']]);
   const resSeg = () => seg('res', 'Kartenauflösung', [[50, '50 m'], [100, '100 m'], [200, '200 m']]);
-  const R_OPTS = [50, 100, 150, 200, 300, 400, 500, 750, 1000];
+  const R_OPTS = [50, 100, 150, 200, 300, 400, 500, 700, 1000];
 
   function tabParams() {
     const f = S.f;
@@ -1105,7 +1119,7 @@
       let r;
       switch (S.tab) {
         case 'erreichbarkeit':
-          r = await rpc('reach', { F: f, dates, res: S.f.res, metric: S.f.reachMetric, R: S.f.R, stops: toStops(R.seq, 0.25, 0.9) });
+          r = await rpc('reach', { F: f, dates, res: S.f.res, metric: S.f.reachMetric, R: S.f.R, classes: S.f.reachMetric === 'prob' ? probClasses() : distClasses() });
           if (seq !== anSeq) return;
           if (!r.polls) { clearRaster(); legendClear(); out().innerHTML = emptyState('Keine Abfrage passt zum Filter.'); break; }
           showRaster(r); renderReachOut(r); break;
@@ -1154,9 +1168,10 @@
 
   function renderReachOut(r) {
     if (S.f.reachMetric === 'prob') {
-      legend(`Chance auf ein Rad im Umkreis von ${S.f.R} m`, `<div class="bar" style="background:${gradient(R.seq)}"></div><div class="scale"><span>selten</span><span>50 %</span><span>immer</span></div>`);
+      legend(`Chance auf ein Rad im Umkreis von ${S.f.R} m`, stepLegend(STEPS.slice().reverse(), PROB_CLASSES.map((c) => c[1])));
     } else {
-      legend('Typischer Weg zum nächsten Rad', `<div class="bar" style="background:${gradient(R.seq)}"></div><div class="scale"><span>über 1,5 km</span><span>300 m</span><span>unter 50 m</span></div>`);
+      legend('Typischer Weg zum nächsten Rad (Luftlinie), bis …',
+        stepLegend(STEPS, DIST_CLASSES.map((c) => c[1]), DIST_CLASSES.map((c) => `~${c[2]} Min.`)) + '<p class="hint legend-note">Ohne Farbe: weiter als 1,2 km. Gehzeit bei Luftlinie, der echte Weg ist etwas länger.</p>');
     }
     $('#aOut').innerHTML = `${basisLine(r.polls, r.days, r.sampled > r.polls ? `Gleichmäßige Stichprobe aus ${nf.format(r.sampled)} passenden Abfragen.` : '')}
       <p class="hint">Tipp: irgendwo auf die Karte tippen. Dann wird für genau diesen Ort gerechnet, mit Tagesverlauf.</p>
