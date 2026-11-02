@@ -170,8 +170,28 @@ class _Handler(http.server.SimpleHTTPRequestHandler):
         log.debug("http: " + fmt, *args)
 
 
+SEED_DIR = Path(__file__).resolve().parent.parent / "seed" / "history"
+
+
+def seed_history(cfg: Config) -> int:
+    """On a fresh volume, start from the history bundled into the image
+    (the repo's data/history at build time). Never touches existing data."""
+    hist = cfg.history_dir
+    if (hist / "runs.csv").exists() or not (SEED_DIR / "runs.csv").exists():
+        return 0
+    n = 0
+    for src in SEED_DIR.rglob("*.csv"):
+        dst = hist / src.relative_to(SEED_DIR)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        n += 1
+    log.info("seeded %d history files from the image", n)
+    return n
+
+
 def serve(cfg: Config) -> None:
     cfg.site_dir.mkdir(parents=True, exist_ok=True)
+    seed_history(cfg)
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
 

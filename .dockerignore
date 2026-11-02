@@ -1,6 +1,7 @@
 .git
 .github
-data
+data/*
+!data/history
 tests
 **/__pycache__
 .pytest_cache

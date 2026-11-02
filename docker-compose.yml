@@ -19,6 +19,11 @@ services:
       - TILE_API_KEY=${TILE_API_KEY:-}
       # Render map.png / heatmap.png on every update (true/false)
       - RENDER_PNG=${RENDER_PNG:-true}
+      # Rebuild the history files for timeline and analysis at most this often
+      # (minutes). Same as the poll interval = every poll shows up right away.
+      - ANALYSIS_INTERVAL_MINUTES=${ANALYSIS_INTERVAL_MINUTES:-13}
+      # How many days of history the web app can load
+      - ANALYSIS_DAYS=${ANALYSIS_DAYS:-56}
       - PORT=8080
     volumes:
       - tracker-data:/data

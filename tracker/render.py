@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import math
@@ -143,15 +144,35 @@ def render_heatmap_png(cfg: Config, basemap: Basemap, bikes: list[dict[str, Any]
 WEB_DIR = Path(__file__).parent / "web"
 
 
+def app_version() -> str:
+    """Short hash of the web app files; changes with every app change."""
+    h = hashlib.sha1()
+    for src in sorted(WEB_DIR.iterdir()):
+        if src.is_file():
+            h.update(src.name.encode())
+            h.update(src.read_bytes())
+    return h.hexdigest()[:10]
+
+
 def copy_web(cfg: Config) -> list[Path]:
-    """Copy the static web app and write its runtime config."""
+    """Copy the static web app and write its runtime config.
+
+    index.html references app.js / app.css with ?v=<app version>, so a browser
+    never runs an old cached copy after an update."""
     out = []
+    ver = app_version()
     for src in sorted(WEB_DIR.iterdir()):
         if src.is_file():
             dst = cfg.site_dir / src.name
-            dst.write_bytes(src.read_bytes())
+            data = src.read_bytes()
+            if src.name == "index.html":
+                text = data.decode("utf-8")
+                text = text.replace('href="app.css"', f'href="app.css?v={ver}"').replace('src="app.js"', f'src="app.js?v={ver}"')
+                data = text.encode("utf-8")
+            dst.write_bytes(data)
             out.append(dst)
     conf = {
+        "app": ver,
         "style_light": cfg.web_style_light,
         "style_dark": cfg.web_style_dark,
         "raster_url": cfg.web_tile_url,
@@ -179,6 +200,8 @@ def write_site(cfg: Config, bikes: list[dict[str, Any]], stations: list[dict[str
     written = []
 
     written.append(write_json(site / "latest.json", {"meta": meta, "bikes": bikes, "stations": stations}))
+    # tiny file the open web app polls to notice new data or a new app version
+    written.append(write_json(site / "status.json", {"ts": meta.get("ts"), "app": app_version()}))
 
     written += copy_web(cfg)
 

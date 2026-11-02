@@ -13,6 +13,7 @@ const COS = Math.cos(((BBOX.s + BBOX.n) / 2) * Math.PI / 180);
 const M_LNG = M_LAT * COS;
 
 let BASE = './';
+let VER = '';                    // data version (tl/index.json "generated"), busts the HTTP cache
 const DAYS = new Map();          // date -> decoded day
 const G = { bikeIdx: new Map(), bikeIds: [], stIdx: new Map(), st: [] };
 const pollInfo = new Map();      // t -> { wd 0..6 (Mo..So), min }
@@ -34,7 +35,7 @@ const inWindow = (min, t0, t1) => (t0 === t1 ? true : t0 < t1 ? min >= t0 && min
 // ------------------------------------------------------------------ loading
 async function loadDay(date) {
   if (DAYS.has(date)) return DAYS.get(date);
-  const r = await fetch(`${BASE}tl/${date}.json?v=${Math.floor(Date.now() / 600000)}`);
+  const r = await fetch(`${BASE}tl/${date}.json?v=${encodeURIComponent(VER || Math.floor(Date.now() / 600000))}`);
   if (!r.ok) throw new Error(`tl/${date}.json: ${r.status}`);
   const d = await r.json();
   const bmap = d.bikes.map((id) => {
@@ -644,11 +645,20 @@ function tripsList({ dates, P }) {
 // ------------------------------------------------------------------ rpc
 const OPS = {
   async init({ base }) { BASE = base; return true; },
+  // new data arrived: forget the changed days and every cached result built on them
+  async invalidate({ dates }) {
+    for (const d of dates) DAYS.delete(d);
+    tripCache = { key: '', res: null };
+    reachCache = { key: '', g: null, hist: null, polls: 0, days: 0, sampled: 0 };
+    activeBB = { key: '', bb: BBOX };
+    return true;
+  },
   async load({ dates }) { for (const d of dates) await loadDay(d); return { bikes: G.bikeIds.length, stations: G.st.length }; },
   avail, density, point, stations, stationProfile, usage, flows, inuseSeries, reach, tripsList, coverage,
 };
 self.onmessage = async (e) => {
-  const { id, op, args } = e.data;
+  const { id, op, args, ver } = e.data;
+  if (ver) VER = ver;
   try {
     if (args && args.dates) for (const d of args.dates) await loadDay(d);
     const res = await OPS[op](args || {});

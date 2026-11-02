@@ -349,7 +349,17 @@ h3.group { margin: 24px 0 0; color: var(--ink); font-weight: 600; }
 .toast { position: fixed; z-index: 60; left: 50%; top: calc(14px + var(--safe-t)); transform: translateX(-50%);
   background: var(--ink); color: var(--surface); padding: 10px 16px; border-radius: 999px; font-size: 14px; box-shadow: var(--shadow);
   max-width: calc(100vw - 32px); text-align: center; }
-.map-tools { position: fixed; z-index: 5; right: 12px; top: calc(12px + var(--safe-t)); display: flex; flex-direction: column; gap: 8px; }
+.fresh { position: fixed; z-index: 6; right: 12px; top: calc(12px + var(--safe-t)); height: 32px; padding: 0 9px 0 11px; border: 0; border-radius: 16px;
+  background: var(--surface); box-shadow: var(--shadow); color: var(--ink-2); font: 500 13px/1 var(--font); font-variant-numeric: tabular-nums;
+  display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; cursor: pointer; }
+.fresh .dot { width: 8px; height: 8px; border-radius: 50%; background: #2fb36d; flex: none; }
+.fresh.stale .dot { background: #f28a2a; }
+.fresh.newapp { background: var(--ink); color: var(--surface); }
+.fresh.newapp .dot { background: var(--surface); }
+.fresh svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+.fresh.busy svg { animation: spin .8s linear infinite; }
+.fresh::after { content: ""; position: absolute; inset: -6px -2px; } /* bigger tap target */
+.map-tools { position: fixed; z-index: 5; right: 12px; top: calc(52px + var(--safe-t)); display: flex; flex-direction: column; gap: 8px; }
 .tool { width: 44px; height: 44px; border-radius: var(--r-md); border: 0; background: var(--surface); box-shadow: var(--shadow); display: grid; place-items: center; }
 .tool svg { width: 22px; height: 22px; fill: none; stroke: var(--ink); stroke-width: 1.8; stroke-linecap: round; }
 .tool.on svg { stroke: var(--station); }
@@ -366,7 +376,8 @@ h3.group { margin: 24px 0 0; color: var(--ink); font-weight: 600; }
   .peek::after { content: ""; position: absolute; left: calc(-1 * var(--pad)); right: calc(-1 * var(--pad)); bottom: 0; height: 1px; background: var(--line); opacity: 0; transition: opacity .2s; }
   .scroll.scrolled .peek::after { opacity: 1; }
   .more-toggle { display: none; }
-  .map-tools { top: 16px; right: 16px; }
+  .map-tools { top: 56px; right: 16px; }
+  .fresh { top: 16px; right: 16px; }
   .clock b { font-size: 38px; }
 }
 @media (max-width: 380px) {
@@ -376,5 +387,5 @@ h3.group { margin: 24px 0 0; color: var(--ink); font-weight: 600; }
 }
 @media (prefers-reduced-motion: reduce) {
   #panel { transition: none; }
-  .pulse, .busy::before { animation: none; }
+  .pulse, .busy::before, .fresh.busy svg { animation: none; }
 }

@@ -35,8 +35,8 @@
   };
   const fmtWhen = (t) => `${fDate.format(new Date(t * 1000))}, ${fTime.format(new Date(t * 1000))} Uhr`;
   const minToStr = (m) => `${String(Math.floor(m / 60) % 24).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
-  async function getJSON(url) {
-    const r = await fetch(`${url}?v=${Math.floor(Date.now() / 60000)}`);
+  async function getJSON(url, v) {
+    const r = await fetch(`${url}?v=${encodeURIComponent(v ?? Math.floor(Date.now() / 60000))}`);
     if (!r.ok) throw new Error(`${url}: ${r.status}`);
     return r.json();
   }
@@ -412,6 +412,7 @@
     const old = now() - S.live.t > 40 * 60;
     if (old) el.classList.add('stale');
     txt.textContent = `${old ? 'Veraltet' : 'Stand'} ${fTime.format(new Date(S.live.t * 1000))}, vor ${fmtDur(Math.max(0, now() - S.live.t))}`;
+    renderFresh();
   }
 
   // ================================================================ live data
@@ -433,14 +434,68 @@
     }
     if (S.mode === 'karte' && S.k.isLive) renderKarte(true);
     if (S.mode === 'analyse' && S.tab === 'standzeit') renderIdle();
-    updateStatus();
+    updateStatus(); renderFresh();
+  }
+
+  // ================================================================ freshness: poll a tiny status file
+  // status.json = { ts: time of the latest poll, app: version of the web app }.
+  // New ts -> reload live data and the changed history days, re-render.
+  // New app -> the pill offers a reload (and does it when you come back to the tab).
+  const FR = { busy: false, last: 0, app: null, newApp: false };
+  function renderFresh() {
+    const el = $('#fresh'); if (!el) return;
+    const L = S.live, stale = !!L && now() - L.t > 40 * 60;
+    el.classList.toggle('busy', FR.busy);
+    el.classList.toggle('stale', stale && !FR.newApp);
+    el.classList.toggle('newapp', FR.newApp);
+    $('#freshText').textContent = FR.newApp ? 'Neue Version' : L ? `${fTime.format(new Date(L.t * 1000))} · vor ${fmtDur(Math.max(0, now() - L.t))}` : 'lädt …';
+    el.setAttribute('aria-label', FR.newApp ? 'Neue Version der Seite laden'
+      : L ? `Datenstand ${fmtWhen(L.t)}. Tippen zum Aktualisieren.` : 'Daten werden geladen');
+  }
+  async function refreshHistory() {
+    const old = new Map((tlIndex || []).map((d) => [d.date, `${d.n}|${d.t1}`]));
+    let idx;
+    try { idx = await ensureIndex(true); } catch { return false; }
+    const changed = idx.filter((d) => old.get(d.date) !== `${d.n}|${d.t1}`).map((d) => d.date);
+    if (!changed.length) return false;
+    if (worker) await rpc('invalidate', { dates: changed });
+    if (S.tl) S.tl.loaded = 0; // next timeline request reloads
+    if (S.mode === 'karte' && (S.k.isLive || !S.tl)) await reloadTimeline();
+    else if (S.mode === 'analyse') { if (S.tab === 'standzeit') renderIdle(); else scheduleCompute(0); }
+    return true;
+  }
+  async function checkUpdate(manual) {
+    if (FR.busy) return;
+    if (manual && FR.newApp) { location.reload(); return; }
+    FR.busy = true; renderFresh();
+    const before = S.live?.meta?.ts;
+    try {
+      let ts = null;
+      try {
+        const r = await fetch(`status.json?t=${Date.now()}`, { cache: 'no-store' });
+        if (r.ok) {
+          const st = await r.json();
+          ts = st.ts;
+          if (FR.app == null) FR.app = S.cfg?.app || st.app;
+          if (st.app && FR.app && st.app !== FR.app) FR.newApp = true;
+        }
+      } catch { /* older deploy without status.json */ }
+      if (ts == null || ts !== before) await loadLive(true);
+      const fresh = S.live?.meta?.ts !== before;
+      const hist = fresh || manual ? await refreshHistory() : false;
+      if (manual && S.live) toast(fresh || hist ? `Aktualisiert: Stand ${fmtWhen(S.live.t)}.`
+        : `Schon aktuell. Die letzte Abfrage war ${fmtWhen(S.live.t)}, neuere Daten gibt es noch nicht.`);
+      FR.last = now();
+    } finally { FR.busy = false; renderFresh(); }
   }
 
   // ================================================================ history index + worker
-  let tlIndex = null, tlIndexAt = 0;
-  async function ensureIndex() {
-    if (tlIndex && now() - tlIndexAt < 600) return tlIndex;
-    tlIndex = (await getJSON('tl/index.json')).days;
+  let tlIndex = null, tlIndexAt = 0, dataVer = '';
+  async function ensureIndex(force) {
+    if (tlIndex && !force && now() - tlIndexAt < 600) return tlIndex;
+    const ix = await getJSON('tl/index.json', force ? Date.now() : undefined);
+    tlIndex = ix.days;
+    dataVer = String(ix.generated || '');
     tlIndexAt = now();
     return tlIndex;
   }
@@ -453,11 +508,11 @@
   const pending = new Map();
   function rpc(op, args) {
     if (!worker) {
-      worker = new Worker('worker.js');
+      worker = new Worker(`worker.js?v=${S.cfg?.app || ''}`);
       worker.onmessage = (e) => { const p = pending.get(e.data.id); pending.delete(e.data.id); if (p) (e.data.ok ? p.res(e.data.res) : p.rej(new Error(e.data.err))); };
       worker.postMessage({ id: 0, op: 'init', args: { base: new URL('.', location.href).href } });
     }
-    return new Promise((res, rej) => { const id = ++rid; pending.set(id, { res, rej }); worker.postMessage({ id, op, args }); });
+    return new Promise((res, rej) => { const id = ++rid; pending.set(id, { res, rej }); worker.postMessage({ id, op, args, ver: dataVer }); });
   }
 
   // ================================================================ KARTE: one timeline, live at the right end
@@ -472,7 +527,7 @@
     if (S.tl && S.tl.key === key && now() - S.tl.loaded < 600) return S.tl;
     if (tlLoading?.key === key) return tlLoading.p;
     const p = (async () => {
-      const files = await Promise.all(dates.map((d) => getJSON(`tl/${d}.json`)));
+      const files = await Promise.all(dates.map((d) => getJSON(`tl/${d}.json`, dataVer || undefined)));
       const bIdx = new Map(), bikes = [], sIdx = new Map(), stations = [];
       const t = [], frames = [], gone = [], reset = [];
       for (const d of files) {
@@ -683,6 +738,7 @@
 
   function goLive() {
     stopPlay();
+    if (S.tl && !S.tl.loaded) { S.k.isLive = true; reloadTimeline(); return; } // newer data arrived meanwhile
     S.k.isLive = true;
     if (S.tl) $('#tlRange').value = S.tl.t.length;
     closeDetail(true);
@@ -1871,8 +1927,17 @@
 
     addEventListener('hashchange', () => { const m = S.mode, t = S.tab; readHash(); if (m !== S.mode) setMode(S.mode); else if (t !== S.tab) enterAnalysis(); });
     setInterval(updateStatus, 30000);
-    setInterval(() => { if (document.visibilityState === 'visible') loadLive(true); }, 5 * 60000);
-    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.live && now() - S.live.t > 14 * 60) loadLive(true); });
+    // look for new data every minute while the page is visible, and right away when you come back
+    setInterval(() => { if (document.visibilityState === 'visible') checkUpdate(false); }, 60000);
+    const back = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (FR.newApp) { location.reload(); return; }
+      if (now() - FR.last > 20) checkUpdate(false);
+    };
+    document.addEventListener('visibilitychange', back);
+    addEventListener('pageshow', (e) => { if (e.persisted) back(); });
+    addEventListener('online', back);
+    $('#fresh').addEventListener('click', () => checkUpdate(true));
     matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => location.reload());
   }
 

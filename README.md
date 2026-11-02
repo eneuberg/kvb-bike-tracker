@@ -71,6 +71,8 @@ One-time setup: **Settings → Pages → Source: GitHub Actions**. Optionally ad
 
 In Coolify: **New Resource → Docker Compose → this repo**, assign a domain to the `tracker` service (port 8080), deploy.
 
+On the first start with an empty volume, the container copies the history that GitHub Actions had recorded up to the image build (`data/history`), so the timeline does not start from zero. After that, the container keeps its own history in the volume and never overwrites it.
+
 | env var | default | description |
 |---|---|---|
 | `UPDATE_INTERVAL_MINUTES` | `13` | poll interval in minutes (fractions allowed, minimum 1); 13 is prime, so it doesn't lock onto hourly patterns |
@@ -81,9 +83,11 @@ In Coolify: **New Resource → Docker Compose → this repo**, assign a domain t
 | `TILE_API_KEY` | – | free [CARTO basemap key](https://carto.com/basemaps/apikey) for the PNG renders; see *Basemap* below |
 | `ANALYSIS_DAYS` | `56` | how many days of history the web app can load (Verlauf and Analyse) |
 | `TIMELINE_STEP_MINUTES` | `5` | minimum spacing of exported polls (matters for 1-minute polling) |
-| `ANALYSIS_INTERVAL_MINUTES` | `30` | container only: re-export the history at most this often |
+| `ANALYSIS_INTERVAL_MINUTES` | `13` in compose (`30` otherwise) | container only: rebuild the timeline/analysis files at most this often |
 
-The container serves `/` (interactive map), `/map.png`, `/heatmap.png`, `/latest.json` (current state) and `/history/` (all CSVs).
+The container serves `/` (interactive map), `/map.png`, `/heatmap.png`, `/latest.json` (current state), `/status.json` (time of the latest poll and app version) and `/history/` (all CSVs).
+
+An open page checks `status.json` every minute and when you return to the tab. New data is loaded in place; a new app version shows "Neue Version" in the top-right badge. The badge also shows the data time; tap it to check now.
 
 Locally:
 

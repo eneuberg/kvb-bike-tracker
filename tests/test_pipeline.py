@@ -1,3 +1,4 @@
+import json
 import copy
 import csv
 from datetime import datetime, timedelta, timezone
@@ -75,7 +76,29 @@ def test_render_site(tmp_path):
     bikes, stations, meta = normalize(make(), cfg)
     written = render.write_site(cfg, bikes, stations, meta)
     names = {p.name for p in written}
-    assert {"latest.json", "index.html", "map.png", "heatmap.png"} <= names
+    assert {"latest.json", "status.json", "index.html", "map.png", "heatmap.png"} <= names
+    # the open web app polls status.json; app files are versioned against stale caches
+    st = json.loads((cfg.site_dir / "status.json").read_text())
+    assert st["ts"] == meta["ts"] and st["app"] == render.app_version()
+    html = (cfg.site_dir / "index.html").read_text()
+    assert f'app.js?v={st["app"]}' in html and f'app.css?v={st["app"]}' in html
+    assert json.loads((cfg.site_dir / "config.json").read_text())["app"] == st["app"]
+
+
+def test_seed_history(tmp_path, monkeypatch):
+    from tracker import main as m
+
+    seed = tmp_path / "seed"
+    (seed / "2026/11").mkdir(parents=True)
+    (seed / "runs.csv").write_text("ts\n")
+    (seed / "2026/11/2026-11-01.csv").write_text("x\n")
+    monkeypatch.setattr(m, "SEED_DIR", seed)
+    cfg = _cfg(tmp_path)
+    assert m.seed_history(cfg) == 2
+    assert (cfg.history_dir / "2026/11/2026-11-01.csv").read_text() == "x\n"
+    (cfg.history_dir / "runs.csv").write_text("own\n")
+    assert m.seed_history(cfg) == 0  # never overwrites existing history
+    assert (cfg.history_dir / "runs.csv").read_text() == "own\n"
 
 
 def test_tile_config(monkeypatch):
