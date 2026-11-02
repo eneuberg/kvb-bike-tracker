@@ -1334,7 +1334,7 @@
   }
 
   // ---- idle time on a continuous scale, minutes to days
-  const IDLE_TICKS = [[3600, '1 Std.'], [6 * 3600, '6 Std.'], [86400, '1 Tag'], [7 * 86400, '7 Tage']];
+  const IDLE_TICKS = [[3600, '1 Std.'], [6 * 3600, '6 Std.'], [86400, '1 Tag'], [3 * 86400, '3 Tage']];
   const idleL = (s) => Math.min(1, Math.max(0, Math.log(Math.max(s, 600) / 600) / Math.log((14 * 86400) / 600)));
   function renderIdle() {
     if (!S.live || S.mode !== 'analyse' || S.tab !== 'standzeit') return;
