@@ -1,0 +1,47 @@
+name: build routing graph
+
+# Downloads the Köln street/path network from OpenStreetMap (Overpass API) and
+# commits a compact bicycle routing graph to data/osm/. The web app uses it to
+# draw estimated trips along streets instead of straight lines.
+# Map data © OpenStreetMap contributors, ODbL.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "37 3 2 * *"   # once a month (2nd, 03:37 UTC); OSM changes slowly
+
+permissions:
+  contents: write
+
+concurrency:
+  group: history-writer      # never race the history commits of "update map"
+  cancel-in-progress: false
+
+jobs:
+  graph:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build graph from OpenStreetMap
+        run: python tools/build_graph.py data/osm/koeln-bike.graph.gz
+
+      - name: Commit graph
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/osm
+          git diff --cached --quiet && { echo "graph unchanged"; exit 0; }
+          git commit -q -m "routing graph: OpenStreetMap $(date -u +%Y-%m-%d)"
+          for i in 1 2 3 4 5; do
+            git fetch -q origin main
+            git rebase -q origin/main && git push -q origin HEAD:main && exit 0
+            sleep $((i * 5))
+          done
+          exit 1
