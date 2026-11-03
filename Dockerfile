@@ -15,8 +15,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY tracker ./tracker
-# history recorded by GitHub Actions so far; copied into an empty volume on first start
-COPY data/history ./seed/history
+# history recorded by GitHub Actions so far (copied into an empty volume on first
+# start) and the routing graph (data/osm, built by .github/workflows/graph.yml)
+COPY data ./seed
 
 USER tracker
 VOLUME ["/data"]

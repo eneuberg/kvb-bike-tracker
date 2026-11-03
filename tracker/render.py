@@ -154,6 +154,36 @@ def app_version() -> str:
     return h.hexdigest()[:10]
 
 
+GRAPH_NAME = "koeln-bike.graph.gz"
+
+
+def find_graph(cfg: Config) -> Path | None:
+    """Routing graph built by tools/build_graph.py: explicit path, the data dir,
+    the copy baked into the Docker image, or the repo checkout."""
+    root = Path(__file__).resolve().parent.parent
+    for p in (cfg.graph_file, cfg.data_dir / "osm" / GRAPH_NAME, root / "seed" / "osm" / GRAPH_NAME, root / "data" / "osm" / GRAPH_NAME):
+        if p and p.is_file():
+            return p
+    return None
+
+
+def copy_graph(cfg: Config) -> Path | None:
+    src = find_graph(cfg)
+    if not src:
+        return None
+    dst = cfg.site_dir / "graph.bin.gz"
+    if not dst.exists() or dst.stat().st_size != src.stat().st_size or dst.stat().st_mtime < src.stat().st_mtime:
+        dst.write_bytes(src.read_bytes())
+    return dst
+
+
+def graph_version(p: Path | None) -> str:
+    if not p:
+        return ""
+    st = p.stat()
+    return hashlib.sha1(f"{st.st_size}:{int(st.st_mtime)}".encode()).hexdigest()[:10]
+
+
 def copy_web(cfg: Config) -> list[Path]:
     """Copy the static web app and write its runtime config.
 
@@ -171,8 +201,13 @@ def copy_web(cfg: Config) -> list[Path]:
                 data = text.encode("utf-8")
             dst.write_bytes(data)
             out.append(dst)
+    graph = copy_graph(cfg)
+    if graph:
+        out.append(graph)
     conf = {
         "app": ver,
+        "graph": graph_version(graph),
+        "trail_max_days": cfg.trail_max_days,
         "style_light": cfg.web_style_light,
         "style_dark": cfg.web_style_dark,
         "raster_url": cfg.web_tile_url,

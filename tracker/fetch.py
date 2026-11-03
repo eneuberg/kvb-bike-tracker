@@ -31,6 +31,10 @@ def fetch_raw(cfg: Config) -> dict[str, Any]:
         try:
             resp = requests.get(url, params=params, headers=headers, timeout=cfg.request_timeout)
             resp.raise_for_status()
+            # transfer size (compressed, if the server compresses) vs. payload size
+            wire = resp.raw.tell() if hasattr(resp.raw, "tell") else None
+            log.info("feed: %s bytes on the wire, %s bytes JSON (%s)", wire, len(resp.content),
+                     resp.headers.get("Content-Encoding", "uncompressed"))
             data = resp.json()
             if not isinstance(data, dict) or "countries" not in data:
                 raise FetchError(f"unexpected payload from {url}")

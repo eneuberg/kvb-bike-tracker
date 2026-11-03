@@ -2,6 +2,7 @@
 .github
 data/*
 !data/history
+!data/osm
 tests
 **/__pycache__
 .pytest_cache

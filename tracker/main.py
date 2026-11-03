@@ -11,6 +11,7 @@ import functools
 import json
 import http.server
 import logging
+import random
 import shutil
 import signal
 import sys
@@ -216,6 +217,7 @@ class Poller:
         self.cfg = cfg
         self.lock = threading.Lock()
         self.last = 0.0  # epoch of the last poll attempt
+        self.jitter = 0.0
 
     def _run(self, manual: bool) -> bool:
         started = time.time()  # matches the data timestamp the page sees
@@ -227,6 +229,8 @@ class Poller:
             return False
         finally:
             self.last = started
+            j = self.cfg.update_jitter_seconds
+            self.jitter = random.uniform(-j, j) if j else 0.0
 
     def poll(self) -> bool:
         with self.lock:
@@ -250,7 +254,8 @@ class Poller:
             self.lock.release()
 
     def due_in(self) -> float:
-        return self.last + self.cfg.update_interval_seconds - time.time()
+        # the gap to the next automatic poll varies a little at random
+        return self.last + self.cfg.update_interval_seconds + self.jitter - time.time()
 
 
 def serve(cfg: Config) -> None:

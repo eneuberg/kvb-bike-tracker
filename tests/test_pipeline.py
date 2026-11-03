@@ -168,3 +168,17 @@ def test_manual_refresh_rate_limit(tmp_path, monkeypatch):
     cfg.manual_min_interval_seconds = 180
     st = json.loads(render.write_status(cfg, None).read_text())
     assert st["mode"] == "static" and st["manual_s"] == 0
+
+
+def test_graph_is_published(tmp_path):
+    """The routing graph goes next to the page, with a version in config.json."""
+    cfg = _cfg(tmp_path)
+    g = tmp_path / "g.gz"
+    g.write_bytes(b"\x1f\x8b fake graph")
+    cfg.graph_file = g
+    cfg.trail_max_days = 3
+    cfg.site_dir.mkdir(parents=True, exist_ok=True)
+    render.copy_web(cfg)
+    assert (cfg.site_dir / "graph.bin.gz").read_bytes() == g.read_bytes()
+    conf = json.loads((cfg.site_dir / "config.json").read_text())
+    assert conf["graph"] and conf["trail_max_days"] == 3

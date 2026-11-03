@@ -319,6 +319,9 @@ function stationProfile({ F, dates, uid, k }) {
 }
 
 // ------------------------------------------------------------------ trips
+// one trip = TS numbers: start, end, lat0, lng0, lat1, lng1, distance, short (1 = jump
+// between two polls, no absence), bike index, start station, end station (-1 = free)
+const TS = 11;
 let tripCache = { key: '', res: null };
 function inferTrips(dates, P) {
   const key = `${dates.join(',')}|${P.minGone}|${P.jump}|${P.maxDur}`;
@@ -326,6 +329,7 @@ function inferTrips(dates, P) {
   const N = G.bikeIds.length;
   const prevP = new Uint8Array(N), prevLat = new Float64Array(N), prevLng = new Float64Array(N);
   const oT0 = new Float64Array(N), oT1 = new Float64Array(N), oLat = new Float64Array(N), oLng = new Float64Array(N), open = new Uint8Array(N);
+  const prevSt = new Int32Array(N).fill(-1), oSt = new Int32Array(N).fill(-1);
   const trips = [];
   const pollT = [], pollTotal = [];
   let prevT = null, service = 0, round = 0, unclear = 0;
@@ -342,29 +346,33 @@ function inferTrips(dates, P) {
         const was = prevP[b];
         if (was && now) {
           const d = dist(prevLat[b], prevLng[b], S.lat[b], S.lng[b]);
-          if (d > P.jump) { if (t - prevT > MAX_GAP) unclear++; else trips.push(prevT, t, prevLat[b], prevLng[b], S.lat[b], S.lng[b], d, 1); }
+          if (d > P.jump) { if (t - prevT > MAX_GAP) unclear++; else trips.push(prevT, t, prevLat[b], prevLng[b], S.lat[b], S.lng[b], d, 1, b, prevSt[b], S.pl[b]); }
         } else if (was && !now) {
-          open[b] = 1; oT0[b] = prevT; oT1[b] = t; oLat[b] = prevLat[b]; oLng[b] = prevLng[b];
+          open[b] = 1; oT0[b] = prevT; oT1[b] = t; oLat[b] = prevLat[b]; oLng[b] = prevLng[b]; oSt[b] = prevSt[b];
         } else if (!was && now && open[b]) {
           open[b] = 0;
           const st = (oT0[b] + oT1[b]) / 2, en = (prevT + t) / 2, d = dist(oLat[b], oLng[b], S.lat[b], S.lng[b]);
           if (en - st > P.maxDur) service++;
           else if (oT1[b] - oT0[b] > MAX_GAP || t - prevT > MAX_GAP) unclear++;
           else if (d < P.minGone) round++;
-          else trips.push(st, en, oLat[b], oLng[b], S.lat[b], S.lng[b], d, 0);
+          else trips.push(st, en, oLat[b], oLng[b], S.lat[b], S.lng[b], d, 0, b, oSt[b], S.pl[b]);
         }
       }
       prevP[b] = now;
-      if (now) { prevLat[b] = S.lat[b]; prevLng[b] = S.lng[b]; }
+      if (now) { prevLat[b] = S.lat[b]; prevLng[b] = S.lng[b]; prevSt[b] = S.pl[b]; }
     }
     pollT.push(t); pollTotal.push(total);
     prevT = t;
   });
   // bikes in use = long trips in progress (+ open absences younger than maxDur)
   const starts = [], ends = [];
-  for (let i = 0; i < trips.length; i += 8) if (!trips[i + 7]) { starts.push(trips[i]); ends.push(trips[i + 1]); }
+  for (let i = 0; i < trips.length; i += TS) if (!trips[i + 7]) { starts.push(trips[i]); ends.push(trips[i + 1]); }
   const last = pollT[pollT.length - 1];
-  for (let b = 0; b < N; b++) if (open[b] && last - (oT0[b] + oT1[b]) / 2 <= P.maxDur) starts.push((oT0[b] + oT1[b]) / 2);
+  const openNow = []; // bikes away right now: [bike, since, lat, lng, station]
+  for (let b = 0; b < N; b++) if (open[b] && last - (oT0[b] + oT1[b]) / 2 <= P.maxDur) {
+    starts.push((oT0[b] + oT1[b]) / 2);
+    openNow.push(b, (oT0[b] + oT1[b]) / 2, oLat[b], oLng[b], oSt[b]);
+  }
   starts.sort((a, b) => a - b); ends.sort((a, b) => a - b);
   const inuse = new Int32Array(pollT.length);
   let si = 0, ei = 0;
@@ -374,7 +382,7 @@ function inferTrips(dates, P) {
     while (ei < ends.length && ends[ei] <= t) ei++;
     inuse[k] = Math.max(0, si - ei);
   }
-  const res = { trips: Float64Array.from(trips), pollT, pollTotal, inuse, service, round, unclear };
+  const res = { trips: Float64Array.from(trips), pollT, pollTotal, inuse, service, round, unclear, openNow };
   tripCache = { key, res };
   return res;
 }
@@ -397,7 +405,7 @@ function usage({ F, dates, P }) {
     inuseH[h] += R.inuse[k]; inuseN[h]++;
     daysSel.add(Math.floor((t + 3600) / 86400));
   });
-  for (let i = 0; i < tr.length; i += 8) {
+  for (let i = 0; i < tr.length; i += TS) {
     const s = tripStart(tr, i), p = info(Math.round(s)) ;
     if (!F.wd[p.wd]) continue;
     perHour[Math.floor(p.min / 60)]++;
@@ -436,7 +444,7 @@ function flows({ F, dates, P, cell, top, min }) {
     v[k]++; v[2] += lat; v[3] += lng; v[4]++;
   };
   let used = 0;
-  for (let i = 0; i < tr.length; i += 8) {
+  for (let i = 0; i < tr.length; i += TS) {
     const s = tripStart(tr, i), p = info(Math.round(s));
     if (!F.wd[p.wd] || !inWindow(p.min, F.t0, F.t1)) continue;
     const a = cellOf(g, tr[i + 2], tr[i + 3]), b = cellOf(g, tr[i + 4], tr[i + 5]);
@@ -639,12 +647,325 @@ function reach({ F, dates, res, metric, R, classes }) {
 // all inferred trips of the given days (for the animated map)
 function tripsList({ dates, P }) {
   const R = inferTrips(dates, P);
-  return { trips: R.trips.slice(), pollT: R.pollT, inuse: Array.from(R.inuse) };
+  return { trips: R.trips.slice(), pollT: R.pollT, inuse: Array.from(R.inuse), bikes: G.bikeIds,
+    stations: G.st.map((s) => [s.uid, s.name]), openNow: R.openNow };
+}
+
+// ------------------------------------------------------------------ routing
+// Bicycle graph from OpenStreetMap (tools/build_graph.py). Start and end are
+// snapped to the nearest street; the cheapest path is found with A*.
+// Costs: length x factor (cycleways cheaper, busy roads, rough surfaces and
+// pushing dearer; against a one-way street = pushing, factor 4).
+// The heuristic (straight distance x 0.8, the lowest factor) never
+// overestimates, so A* returns the cheapest path under these costs.
+// It is an estimate of the way taken, not the way actually ridden.
+let GRAPH_VER = '';
+let GR = null, grLoading = null;
+const MIN_FACTOR = 0.8, SNAP_MAX = 250, CELL = 60;
+
+async function loadGraph() {
+  if (GR) return GR;
+  if (!grLoading) grLoading = (async () => {
+    const r = await fetch(`${BASE}graph.bin.gz?v=${encodeURIComponent(GRAPH_VER || '1')}`);
+    if (!r.ok) return null;
+    const raw = new Uint8Array(await r.arrayBuffer());
+    let buf = raw.buffer;
+    // the file is gzip; a server may already have decoded it (Content-Encoding)
+    if (raw[0] === 0x1f && raw[1] === 0x8b) buf = await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+    GR = parseGraph(buf);
+    return GR;
+  })().catch((e) => { console.warn('graph', e); return null; });
+  return grLoading;
+}
+
+function parseGraph(buf) {
+  const dv = new DataView(buf);
+  if (String.fromCharCode(...new Uint8Array(buf, 0, 4)) !== 'KVBG') throw new Error('bad graph file');
+  const N = dv.getUint32(8, true), E = dv.getUint32(12, true), V = dv.getUint32(16, true);
+  let o = 32;
+  const take = (T, n) => { const a = new T(buf, o, n); o += a.byteLength; return a; };
+  const nla = take(Int32Array, N), nlo = take(Int32Array, N);
+  const eu = take(Uint32Array, E), ev = take(Uint32Array, E), elen = take(Float32Array, E), gofs = take(Uint32Array, E + 1);
+  const vla = take(Int32Array, V), vlo = take(Int32Array, V);
+  const fac = take(Uint8Array, E), fl = take(Uint8Array, E);
+  // local metric coordinates for the heuristic and snapping
+  const X = new Float64Array(N), Y = new Float64Array(N);
+  for (let i = 0; i < N; i++) { X[i] = (nlo[i] / 1e6 - BBOX.w) * M_LNG; Y[i] = (nla[i] / 1e6 - BBOX.s) * M_LAT; }
+  // cost per metre in drawing direction (fwd) and against it (rev)
+  const cf = new Float32Array(E), cr = new Float32Array(E);
+  for (let e = 0; e < E; e++) { const f = fac[e] / 20; cf[e] = f * (fl[e] & 2 ? 4 : 1); cr[e] = f * (fl[e] & 1 ? 4 : 1); }
+  // adjacency (CSR): arc = edge e forward (2e) or backward (2e+1)
+  const off = new Uint32Array(N + 1);
+  for (let e = 0; e < E; e++) { off[eu[e] + 1]++; off[ev[e] + 1]++; }
+  for (let i = 0; i < N; i++) off[i + 1] += off[i];
+  const fill = off.slice(0, N), arcTo = new Uint32Array(2 * E), arcCost = new Float32Array(2 * E), arcId = new Uint32Array(2 * E);
+  for (let e = 0; e < E; e++) {
+    let k = fill[eu[e]]++; arcTo[k] = ev[e]; arcCost[k] = elen[e] * cf[e]; arcId[k] = 2 * e;
+    k = fill[ev[e]]++; arcTo[k] = eu[e]; arcCost[k] = elen[e] * cr[e]; arcId[k] = 2 * e + 1;
+  }
+  const g = { N, E, nla, nlo, eu, ev, elen, gofs, vla, vlo, X, Y, cf, cr, off, arcTo, arcCost, arcId,
+    gS: new Float64Array(N), stamp: new Uint32Array(N), done: new Uint32Array(N), prev: new Int32Array(N), run: 0 };
+  // snap index: cell -> edges with a segment crossing that cell's area
+  const W = Math.ceil(((BBOX.e - BBOX.w) * M_LNG) / CELL), H = Math.ceil(((BBOX.n - BBOX.s) * M_LAT) / CELL);
+  const cnt = new Uint32Array(W * H + 1);
+  const each = (cb) => {
+    for (let e = 0; e < E; e++) {
+      const P = edgePts(g, e);
+      let last = -1;
+      for (let k = 0; k + 3 < P.length; k += 2) {
+        const x0 = Math.max(0, Math.floor(Math.min(P[k], P[k + 2]) / CELL)), x1 = Math.min(W - 1, Math.floor(Math.max(P[k], P[k + 2]) / CELL));
+        const y0 = Math.max(0, Math.floor(Math.min(P[k + 1], P[k + 3]) / CELL)), y1 = Math.min(H - 1, Math.floor(Math.max(P[k + 1], P[k + 3]) / CELL));
+        for (let yy = y0; yy <= y1; yy++) for (let xx = x0; xx <= x1; xx++) { const c = yy * W + xx; if (c !== last) cb(e, c); last = c; }
+      }
+    }
+  };
+  each((e, c) => { cnt[c + 1]++; });
+  for (let i = 0; i < W * H; i++) cnt[i + 1] += cnt[i];
+  const pos = cnt.slice(0, W * H), cE = new Uint32Array(cnt[W * H]);
+  each((e, c) => { cE[pos[c]++] = e; });
+  Object.assign(g, { W, H, cnt, cE });
+  return g;
+}
+
+// polyline of edge e from u to v, in local metres: [x0, y0, x1, y1, ...]
+function edgePts(g, e) {
+  const a = g.gofs[e], b = g.gofs[e + 1], P = new Float64Array((b - a + 2) * 2);
+  P[0] = g.X[g.eu[e]]; P[1] = g.Y[g.eu[e]];
+  for (let k = a; k < b; k++) { P[(k - a + 1) * 2] = (g.vlo[k] / 1e6 - BBOX.w) * M_LNG; P[(k - a + 1) * 2 + 1] = (g.vla[k] / 1e6 - BBOX.s) * M_LAT; }
+  P[P.length - 2] = g.X[g.ev[e]]; P[P.length - 1] = g.Y[g.ev[e]];
+  return P;
+}
+const toLL = (x, y) => [+(BBOX.w + x / M_LNG).toFixed(6), +(BBOX.s + y / M_LAT).toFixed(6)];
+
+// nearest point on any street: { e, along (m from u), x, y, d }
+function snap(g, lat, lng) {
+  const x = (lng - BBOX.w) * M_LNG, y = (lat - BBOX.s) * M_LAT;
+  const cx = Math.floor(x / CELL), cy = Math.floor(y / CELL), R = Math.ceil(SNAP_MAX / CELL);
+  const seen = new Set();
+  let best = null;
+  for (let r = 0; r <= R; r++) {
+    for (let yy = cy - r; yy <= cy + r; yy++) for (let xx = cx - r; xx <= cx + r; xx++) {
+      if (Math.max(Math.abs(yy - cy), Math.abs(xx - cx)) !== r || xx < 0 || yy < 0 || xx >= g.W || yy >= g.H) continue;
+      const c = yy * g.W + xx;
+      for (let j = g.cnt[c]; j < g.cnt[c + 1]; j++) {
+        const e = g.cE[j]; if (seen.has(e)) continue; seen.add(e);
+        const P = edgePts(g, e);
+        let acc = 0;
+        for (let k = 0; k + 3 < P.length; k += 2) {
+          const ax = P[k], ay = P[k + 1], bx = P[k + 2], by = P[k + 3], dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy, L = Math.sqrt(L2);
+          const u = L2 ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / L2)) : 0;
+          const px = ax + u * dx, py = ay + u * dy, d = Math.hypot(x - px, y - py);
+          if (!best || d < best.d) best = { e, along: acc + u * L, x: px, y: py, d };
+          acc += L;
+        }
+      }
+    }
+    // a hit closer than the ring we just finished cannot be beaten further out
+    if (best && best.d <= r * CELL) break;
+  }
+  return best && best.d <= SNAP_MAX ? best : null;
+}
+
+// part of edge e between distances a and b from u (a > b = backwards), local metres
+function edgePart(g, e, a, b) {
+  const P = edgePts(g, e), out = [];
+  const lo = Math.min(a, b), hi = Math.max(a, b);
+  let acc = 0;
+  const pt = (k, u) => [P[k] + u * (P[k + 2] - P[k]), P[k + 1] + u * (P[k + 3] - P[k + 1])];
+  for (let k = 0; k + 3 < P.length; k += 2) {
+    const L = Math.hypot(P[k + 2] - P[k], P[k + 3] - P[k + 1]);
+    if (acc + L >= lo && acc <= hi) {
+      if (!out.length) out.push(pt(k, L ? (lo - acc) / L : 0));
+      if (acc + L <= hi) out.push([P[k + 2], P[k + 3]]);
+      else { out.push(pt(k, L ? (hi - acc) / L : 0)); break; }
+    }
+    acc += L;
+  }
+  return a > b ? out.reverse() : out;
+}
+
+// binary heap of (node, f)
+class Heap {
+  constructor() { this.n = []; this.f = []; }
+  get size() { return this.n.length; }
+  push(n, f) {
+    const N = this.n, F = this.f; let i = N.length; N.push(n); F.push(f);
+    while (i > 0) { const p = (i - 1) >> 1; if (F[p] <= f) break; N[i] = N[p]; F[i] = F[p]; i = p; }
+    N[i] = n; F[i] = f;
+  }
+  pop() {
+    const N = this.n, F = this.f, top = N[0], ln = N.pop(), lf = F.pop();
+    if (N.length) {
+      let i = 0; const L = N.length;
+      for (;;) {
+        let c = 2 * i + 1; if (c >= L) break;
+        if (c + 1 < L && F[c + 1] < F[c]) c++;
+        if (F[c] >= lf) break;
+        N[i] = N[c]; F[i] = F[c]; i = c;
+      }
+      N[i] = ln; F[i] = lf;
+    }
+    return top;
+  }
+  peekF() { return this.f[0]; }
+}
+
+const routeCache = new Map();
+// cheapest route from (lat0,lng0) to (lat1,lng1): { c: [[lng,lat],...], len (m) } or null
+function route(g, lat0, lng0, lat1, lng1) {
+  const key = `${lat0.toFixed(5)},${lng0.toFixed(5)},${lat1.toFixed(5)},${lng1.toFixed(5)}`;
+  if (routeCache.has(key)) return routeCache.get(key);
+  const res = routeNow(g, lat0, lng0, lat1, lng1);
+  if (routeCache.size > 20000) routeCache.clear();
+  routeCache.set(key, res);
+  return res;
+}
+function routeNow(g, lat0, lng0, lat1, lng1) {
+  const A = snap(g, lat0, lng0), B = snap(g, lat1, lng1);
+  if (!A || !B) return null;
+  const run = ++g.run;
+  const { gS, stamp, done, prev, X, Y } = g;
+  const tx = B.x, ty = B.y, h = (n) => Math.hypot(X[n] - tx, Y[n] - ty) * MIN_FACTOR;
+  const heap = new Heap();
+  const seed = (n, c) => { if (stamp[n] !== run || c < gS[n]) { stamp[n] = run; gS[n] = c; prev[n] = -1; heap.push(n, c + h(n)); } };
+  const Le = g.elen[A.e];
+  seed(g.eu[A.e], A.along * g.cr[A.e]);
+  seed(g.ev[A.e], (Le - A.along) * g.cf[A.e]);
+  // reaching the target point from either end of its edge
+  const LB = g.elen[B.e];
+  const exitU = B.along * g.cf[B.e], exitV = (LB - B.along) * g.cr[B.e];
+  let best = Infinity, bestEnd = -1;
+  if (A.e === B.e) best = Math.abs(B.along - A.along) * (B.along >= A.along ? g.cf[A.e] : g.cr[A.e]);
+  let expanded = 0;
+  while (heap.size) {
+    if (heap.peekF() >= best) break;
+    const n = heap.pop();
+    if (done[n] === run) continue;
+    done[n] = run;
+    if (++expanded > 400000) return null;
+    const gn = gS[n];
+    if (n === g.eu[B.e] && gn + exitU < best) { best = gn + exitU; bestEnd = n; }
+    if (n === g.ev[B.e] && gn + exitV < best) { best = gn + exitV; bestEnd = n; }
+    for (let k = g.off[n]; k < g.off[n + 1]; k++) {
+      const m = g.arcTo[k], c = gn + g.arcCost[k];
+      if (stamp[m] !== run || c < gS[m]) { stamp[m] = run; gS[m] = c; prev[m] = k; heap.push(m, c + h(m)); }
+    }
+  }
+  let pts;
+  const sameEdge = A.e === B.e && Math.abs(B.along - A.along) * (B.along >= A.along ? g.cf[A.e] : g.cr[A.e]) <= best + 1e-6;
+  if (bestEnd < 0 || sameEdge) {
+    if (A.e !== B.e) return null;
+    pts = edgePart(g, A.e, A.along, B.along);
+  } else {
+    // walk back from the last node to the seed node
+    const arcs = [];
+    let n = bestEnd;
+    while (prev[n] >= 0) {
+      const k = prev[n];
+      arcs.push(k);
+      const a = g.arcId[k], e = a >> 1;
+      n = a & 1 ? g.ev[e] : g.eu[e]; // backward arc came from v, forward from u
+      if (arcs.length > 50000) return null;
+    }
+    pts = n === g.eu[A.e] ? edgePart(g, A.e, A.along, 0) : edgePart(g, A.e, A.along, Le);
+    for (let i = arcs.length - 1; i >= 0; i--) {
+      const a = g.arcId[arcs[i]], e = a >> 1, P = edgePts(g, e), seg = [];
+      for (let k = 0; k < P.length; k += 2) seg.push([P[k], P[k + 1]]);
+      if (a & 1) seg.reverse();
+      for (let k = 1; k < seg.length; k++) pts.push(seg[k]);
+    }
+    const tail = bestEnd === g.eu[B.e] ? edgePart(g, B.e, 0, B.along) : edgePart(g, B.e, LB, B.along);
+    for (let k = 1; k < tail.length; k++) pts.push(tail[k]);
+  }
+  // include the walk from the bike to the street, so the line starts and ends at the bike
+  const x0 = (lng0 - BBOX.w) * M_LNG, y0 = (lat0 - BBOX.s) * M_LAT, x1 = (lng1 - BBOX.w) * M_LNG, y1 = (lat1 - BBOX.s) * M_LAT;
+  const all = [[x0, y0], ...pts, [x1, y1]];
+  const c = [];
+  let len = 0;
+  for (let k = 0; k < all.length; k++) {
+    if (k) { const d = Math.hypot(all[k][0] - all[k - 1][0], all[k][1] - all[k - 1][1]); if (d < 0.3) continue; len += d; }
+    c.push(toLL(all[k][0], all[k][1]));
+  }
+  return { c, len: Math.round(len) };
+}
+
+async function routes({ pairs }) {
+  const g = await loadGraph();
+  if (!g) return { ok: false, list: [] };
+  const list = [];
+  for (let i = 0; i + 3 < pairs.length; i += 4) list.push(route(g, pairs[i], pairs[i + 1], pairs[i + 2], pairs[i + 3]));
+  return { ok: true, list };
+}
+
+// ------------------------------------------------------------------ one bike / one station over time
+// Stays (parked, possibly several snapshots at about the same place) and the
+// moves between them, from the raw polls of the chosen period.
+async function bikeTrail({ bike, t0, t1, P }) {
+  const b = G.bikeIdx.get(String(bike));
+  const dates = [...DAYS.keys()].sort();
+  if (b == null) return { stays: [], moves: [], polls: 0 };
+  const stays = [];
+  let cur = null, absentSince = null, polls = 0, lastSeenT = null;
+  replay(dates, (t, S) => {
+    if (t < t0 || t > t1) return;
+    polls++;
+    if (!S.p[b]) { if (cur && absentSince == null) absentSince = t; return; }
+    const lat = S.lat[b], lng = S.lng[b], pl = S.pl[b];
+    const same = cur && absentSince == null && cur.st === pl && Math.hypot((lat - cur.lat) * M_LAT, (lng - cur.lng) * M_LNG) < 60;
+    if (same) {
+      cur.t1 = t; cur.n++;
+      const last = cur.pts[cur.pts.length - 1];
+      if (Math.hypot((lat - last[1]) * M_LAT, (lng - last[0]) * M_LNG) > 3) cur.pts.push([+lng.toFixed(6), +lat.toFixed(6)]);
+    } else {
+      const prevStay = cur;
+      cur = { t0: t, t1: t, lat, lng, st: pl, n: 1, pts: [[+lng.toFixed(6), +lat.toFixed(6)]], gapFrom: absentSince != null ? absentSince : null, prevT: lastSeenT };
+      if (prevStay) cur.prev = prevStay;
+      stays.push(cur);
+    }
+    absentSince = null; lastSeenT = t;
+  });
+  const g = await loadGraph();
+  const moves = [];
+  for (let i = 1; i < stays.length; i++) {
+    const a = stays[i - 1], z = stays[i];
+    const d = Math.hypot((z.lat - a.lat) * M_LAT, (z.lng - a.lng) * M_LNG);
+    const absent = z.gapFrom != null;
+    // a trip: the bike left the feed (rented) or moved clearly; else GPS drift or a nudge
+    const kind = absent || d >= P.minGone ? 'trip' : 'shift';
+    const r = kind === 'trip' && g ? route(g, a.lat, a.lng, z.lat, z.lng) : null;
+    moves.push({ from: i - 1, to: i, t0: a.t1, t1: z.t0, d: Math.round(d), absent, kind,
+      service: absent && z.t0 - a.t1 > P.maxDur, route: r ? r.c : null, len: r ? r.len : null });
+  }
+  for (const st of stays) { delete st.prev; delete st.gapFrom; delete st.prevT; st.name = st.st >= 0 ? G.st[st.st].name : null; }
+  const left = absentSince != null ? absentSince : null; // gone at the end of the period: on the road now?
+  return { stays, moves, polls, routing: !!g, leftAt: left };
+}
+
+async function stationMoves({ uid, t0, t1, P, dates }) {
+  const j = G.stIdx.get(String(uid));
+  if (j == null) return { list: [], routing: false };
+  const R = inferTrips(dates, P), tr = R.trips;
+  const g = await loadGraph();
+  const list = [];
+  for (let i = 0; i < tr.length; i += TS) {
+    const s0 = tr[i + 9], s1 = tr[i + 10];
+    if (s0 !== j && s1 !== j) continue;
+    if (s0 === j && s1 === j) continue; // left and came back to the same station
+    if (tr[i + 1] < t0 || tr[i] > t1) continue;
+    const out = s0 === j;
+    const r = g ? route(g, tr[i + 2], tr[i + 3], tr[i + 4], tr[i + 5]) : null;
+    list.push({ out, s: tr[i], e: tr[i + 1], bike: G.bikeIds[tr[i + 8]], d: Math.round(tr[i + 6]), short: !!tr[i + 7],
+      a: [tr[i + 3], tr[i + 2]], b: [tr[i + 5], tr[i + 4]], other: out ? (s1 >= 0 ? G.st[s1].name : null) : (s0 >= 0 ? G.st[s0].name : null),
+      route: r ? r.c : null, len: r ? r.len : null });
+  }
+  list.sort((x, y) => y.s - x.s);
+  return { list, routing: !!g, name: G.st[j].name };
 }
 
 // ------------------------------------------------------------------ rpc
 const OPS = {
-  async init({ base }) { BASE = base; return true; },
+  async init({ base, graph }) { BASE = base; GRAPH_VER = graph || ''; return true; },
+  routes, bikeTrail, stationMoves,
   // new data arrived: forget the changed days and every cached result built on them
   async invalidate({ dates }) {
     for (const d of dates) DAYS.delete(d);

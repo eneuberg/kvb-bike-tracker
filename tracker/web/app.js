@@ -94,7 +94,7 @@
   // ================================================================ state
   const S = {
     mode: 'karte', tab: 'erreichbarkeit', cfg: null, f: null,
-    live: null, tl: null, trips: null, me: null, sel: null, trail: null,
+    live: null, tl: null, trips: null, me: null, sel: null, hist: null, hp: { h: 24, from: null, to: null },
     k: { span: 24, end: null, isLive: true, frame: -1, clock: 0, playing: false, speed: 1, liveInuse: null },
     layers: { stations: true, free: true, trips: true, heat: false },
     wPlaying: false, stList: null,
@@ -177,6 +177,11 @@
       map.addSource(id, { type: 'geojson', data: EMPTY });
     map.addSource('flows', { type: 'geojson', data: EMPTY, lineMetrics: true });
     map.addSource('trips', { type: 'geojson', data: EMPTY, lineMetrics: true });
+    map.addSource('hist', { type: 'geojson', data: EMPTY });
+    // small arrow for the direction of estimated routes (SDF, so it takes any colour)
+    { const n = 24, cv = document.createElement('canvas'); cv.width = cv.height = n; const x = cv.getContext('2d');
+      x.fillStyle = '#fff'; x.beginPath(); x.moveTo(5, 4); x.lineTo(20, 12); x.lineTo(5, 20); x.lineTo(9, 12); x.closePath(); x.fill();
+      map.addImage('arrow', x.getImageData(0, 0, n, n), { sdf: true }); }
     map.addSource('raster', { type: 'image', url: PIXEL, coordinates: [[6.76, 51.09], [7.18, 51.09], [7.18, 50.83], [6.76, 50.83]] });
 
     // under the basemap labels
@@ -197,11 +202,27 @@
     map.addLayer({ id: 'particles', type: 'circle', source: 'particles', layout: { visibility: 'none' },
       paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 1.8, 15, 3.6], 'circle-color': C.trip,
         'circle-stroke-color': C.surface, 'circle-stroke-width': 0.8, 'circle-opacity': ['get', 'o'], 'circle-stroke-opacity': ['get', 'o'] } });
-    map.addLayer({ id: 'trail-line', type: 'line', source: 'trail', filter: ['==', ['geometry-type'], 'LineString'],
-      layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' },
-      paint: { 'line-color': C.ink, 'line-width': 2.2, 'line-dasharray': [1.5, 1.5], 'line-opacity': 0.75 } });
-    map.addLayer({ id: 'trail-pts', type: 'circle', source: 'trail', filter: ['==', ['geometry-type'], 'Point'],
-      layout: { visibility: 'none' }, paint: { 'circle-radius': zoomRadius(4, 7, 10), 'circle-color': C.surface, 'circle-stroke-color': C.ink, 'circle-stroke-width': 2 } });
+    // history of one bike or one station: estimated routes (dashed, with arrows), small
+    // moves, snapshots (every poll the bike was seen) and stays (where it was parked)
+    const hk = (k) => ['==', ['get', 'kind'], k];
+    map.addLayer({ id: 'hist-shift', type: 'line', source: 'hist', filter: hk('shift'), layout: { visibility: 'none', 'line-cap': 'round' },
+      paint: { 'line-color': C.muted, 'line-width': 1.4, 'line-dasharray': [1, 1.5] } });
+    map.addLayer({ id: 'hist-route', type: 'line', source: 'hist', filter: ['any', hk('route'), hk('air')],
+      layout: { visibility: 'none', 'line-cap': 'butt', 'line-join': 'round' },
+      paint: { 'line-color': C.trip, 'line-width': ['interpolate', ['linear'], ['zoom'], 11, 2, 16, 4.2],
+        'line-opacity': ['case', ['==', ['get', 'hi'], 1], 1, ['==', ['get', 'dim'], 1], 0.28, 0.82],
+        'line-dasharray': ['literal', [2, 1.4]] } });
+    map.addLayer({ id: 'hist-arrow', type: 'symbol', source: 'hist', filter: ['any', hk('route'), hk('air')],
+      layout: { visibility: 'none', 'symbol-placement': 'line', 'symbol-spacing': 90, 'icon-image': 'arrow',
+        'icon-size': ['interpolate', ['linear'], ['zoom'], 11, 0.45, 16, 0.75], 'icon-allow-overlap': true, 'icon-rotation-alignment': 'map' },
+      paint: { 'icon-color': C.trip, 'icon-opacity': ['case', ['==', ['get', 'dim'], 1], 0.3, 1] } });
+    map.addLayer({ id: 'hist-snap', type: 'circle', source: 'hist', filter: hk('snap'), layout: { visibility: 'none' },
+      paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 1.4, 17, 3], 'circle-color': C.ink, 'circle-opacity': 0.45 } });
+    map.addLayer({ id: 'hist-stay', type: 'circle', source: 'hist', filter: hk('stay'), layout: { visibility: 'none' },
+      paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 11, ['+', 3, ['get', 'r']], 16, ['+', 6, ['*', 1.6, ['get', 'r']]]],
+        'circle-color': ['case', ['==', ['get', 'st'], 1], C.station, C.free],
+        'circle-stroke-color': ['case', ['==', ['get', 'hi'], 1], C.ink, C.surface], 'circle-stroke-width': ['case', ['==', ['get', 'hi'], 1], 3, 1.6],
+        'circle-opacity': ['case', ['==', ['get', 'dim'], 1], 0.35, 1] } });
     map.addLayer({ id: 'idle-dots', type: 'circle', source: 'idle', layout: { visibility: 'none' },
       paint: { 'circle-radius': zoomRadius(2.4, 5, 10),
         'circle-color': ['interpolate', ['linear'], ['get', 'l'], 0, R.idle[0], 0.25, R.idle[1], 0.5, R.idle[2], 0.75, R.idle[3], 1, R.idle[4]],
@@ -221,11 +242,14 @@
           'text-size': ['interpolate', ['linear'], ['zoom'], 12.6, 9.5, 16, 13], 'text-allow-overlap': true, 'text-ignore-placement': true },
         paint: { 'text-color': ['case', ['==', ['get', 'n'], 0], C.station, '#ffffff'] } });
     }
-    map.addLayer({ id: 'trips-line', type: 'line', source: 'trips', layout: { visibility: 'none', 'line-cap': 'round' },
-      paint: { 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 1.4, 15, 3],
-        'line-gradient': ['interpolate', ['linear'], ['line-progress'], 0, hexA(C.trip, 0), 1, hexA(C.trip, 0.85)], 'line-opacity': ['get', 'o'] } });
+    map.addLayer({ id: 'trips-line', type: 'line', source: 'trips', layout: { visibility: 'none', 'line-cap': 'butt', 'line-join': 'round' },
+      paint: { 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 1.2, 15, 3], 'line-color': C.trip,
+        'line-dasharray': ['literal', [2, 1.4]], 'line-opacity': ['get', 'o'] } });
     map.addLayer({ id: 'trips-dot', type: 'circle', source: 'tripdots', layout: { visibility: 'none' },
-      paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 3, 15, 6], 'circle-color': C.trip, 'circle-stroke-color': C.surface, 'circle-stroke-width': 1.5 } });
+      paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, ['case', ['==', ['get', 'away'], 1], 3.5, 3], 15, ['case', ['==', ['get', 'away'], 1], 7, 6]],
+        'circle-color': ['case', ['==', ['get', 'away'], 1], 'rgba(0,0,0,0)', C.trip],
+        'circle-stroke-color': ['case', ['==', ['get', 'away'], 1], C.trip, C.surface],
+        'circle-stroke-width': ['case', ['==', ['get', 'away'], 1], 2.2, 1.5] } });
     map.addLayer({ id: 'an-st', type: 'circle', source: 'anst', layout: { visibility: 'none' },
       paint: { 'circle-radius': ['interpolate', ['exponential', 1.6], ['zoom'], 10, ['+', 2.5, ['*', 0.9, ['sqrt', ['get', 'a']]]],
           14, ['+', 6, ['*', 2.6, ['sqrt', ['get', 'a']]]], 18, ['+', 12, ['*', 4.2, ['sqrt', ['get', 'a']]]]],
@@ -262,8 +286,15 @@
     const k = S.mode === 'karte', a = !k, t = S.tab, L = S.layers;
     vis('stations-c', k && L.stations); vis('stations-t', k && L.stations);
     vis('free-dots', k && L.free); vis('live-heat', k && L.heat);
-    vis('trips-line', k && L.trips); vis('trips-dot', k && L.trips);
-    vis('trail-line', k && !!S.trail); vis('trail-pts', k && !!S.trail);
+    // while one bike's or station's history is open, everything else steps back
+    const h = k && !!S.hist;
+    vis('trips-line', k && L.trips && !h); vis('trips-dot', k && L.trips && !h);
+    if (map.getLayer('free-dots')) {
+      map.setPaintProperty('free-dots', 'circle-opacity', h ? 0.22 : 1); map.setPaintProperty('free-dots', 'circle-stroke-opacity', h ? 0.22 : 1);
+      map.setPaintProperty('stations-c', 'circle-opacity', h ? 0.3 : 1); map.setPaintProperty('stations-c', 'circle-stroke-opacity', h ? 0.3 : 1);
+      if (map.getLayer('stations-t')) map.setPaintProperty('stations-t', 'text-opacity', h ? 0.3 : 1);
+    }
+    for (const id of ['hist-shift', 'hist-route', 'hist-arrow', 'hist-snap', 'hist-stay']) vis(id, k && !!S.hist);
     vis('raster-l', a && (t === 'erreichbarkeit' || t === 'dichte'));
     const q = anyPointTab() && S.sel?.type === 'point';
     vis('qpt-fill', q); vis('qpt-line', q); vis('qpt-dot', q);
@@ -273,7 +304,7 @@
   }
 
   // ================================================================ picking
-  const PRIORITY = ['stations-c', 'an-st', 'free-dots', 'idle-dots', 'trips-dot', 'trail-pts', 'netc'];
+  const PRIORITY = ['hist-stay', 'stations-c', 'an-st', 'free-dots', 'idle-dots', 'trips-dot', 'hist-route', 'netc'];
   function pick(pt) {
     const layers = PRIORITY.filter(isVis);
     if (!layers.length) return null;
@@ -281,7 +312,7 @@
     const fs = map.queryRenderedFeatures([[pt.x - r, pt.y - r], [pt.x + r, pt.y + r]], { layers });
     if (!fs.length) return null;
     const rank = (f) => PRIORITY.indexOf(f.layer.id);
-    const dist = (f) => { const p = map.project(f.geometry.coordinates); return Math.hypot(p.x - pt.x, p.y - pt.y); };
+    const dist = (f) => { if (f.geometry.type !== 'Point') return 0; const p = map.project(f.geometry.coordinates); return Math.hypot(p.x - pt.x, p.y - pt.y); };
     fs.sort((a, b) => rank(a) - rank(b) || dist(a) - dist(b));
     return fs[0];
   }
@@ -295,8 +326,8 @@
       case 'stations-c': S.k.isLive ? showStation(p.uid) : showTlStation(p.i); break;
       case 'free-dots': S.k.isLive ? showBike(p.id) : showTlBike(p.i); break;
       case 'idle-dots': showBike(p.id); break;
-      case 'trips-dot': showTrip(p); break;
-      case 'trail-pts': showTrail(); break;
+      case 'trips-dot': showTrip({ ...p, lng: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] }); break;
+      case 'hist-stay': case 'hist-route': histFocus(+p.n); break;
       case 'netc': showNetCell(p, f.geometry.coordinates); break;
       case 'an-st': stationQuery(p.uid); break;
       default:
@@ -467,8 +498,8 @@
     $('#fpAge').textContent = L ? `vor ${fmtDur(Math.max(0, now() - L.t))}` : '';
     const btn = $('#fpBtn'), next = L ? L.t + auto : null, hint = $('#fpHint');
     if (serverMode()) {
-      const due = next != null && next - now() > 30 ? fTime.format(new Date(next * 1000)) : 'gleich';
-      $('#fpAuto').textContent = `Automatisch alle ${Math.round(auto / 60)} Min. · nächste ${due}`;
+      const due = next != null && next - now() > 45 ? `etwa ${fTime.format(new Date(next * 1000))}` : 'gleich';
+      $('#fpAuto').textContent = `Automatisch etwa alle ${Math.round(auto / 60)} Min. · nächste ${due}`;
       const w = manualWait(), m = Math.max(1, Math.round(st.manual_s / 60));
       btn.disabled = FR.polling || w > 0;
       btn.textContent = FR.polling ? 'Fragt ab …' : w > 0 ? `Wieder in ${clock(w)}` : 'Jetzt abfragen';
@@ -570,7 +601,7 @@
     if (!worker) {
       worker = new Worker(`worker.js?v=${S.cfg?.app || ''}`);
       worker.onmessage = (e) => { const p = pending.get(e.data.id); pending.delete(e.data.id); if (p) (e.data.ok ? p.res(e.data.res) : p.rej(new Error(e.data.err))); };
-      worker.postMessage({ id: 0, op: 'init', args: { base: new URL('.', location.href).href } });
+      worker.postMessage({ id: 0, op: 'init', args: { base: new URL('.', location.href).href, graph: S.cfg?.graph || '' } });
     }
     return new Promise((res, rej) => { const id = ++rid; pending.set(id, { res, rej }); worker.postMessage({ id, op, args, ver: dataVer }); });
   }
@@ -630,13 +661,21 @@
     try {
       const r = await rpc('tripsList', { dates: T.dates, P: tripParams() });
       if (S.tl !== T) return;
-      const tr = r.trips, n = tr.length / 8, list = [];
+      const TS = 11, tr = r.trips, n = tr.length / TS, list = [];
+      const stName = (j) => (j >= 0 ? r.stations[j]?.[1] : null);
       for (let i = 0; i < n; i++) {
-        const o = i * 8;
-        list.push({ s: tr[o], e: tr[o + 1], a: [tr[o + 3], tr[o + 2]], b: [tr[o + 5], tr[o + 4]], d: tr[o + 6], short: !!tr[o + 7] });
+        const o = i * TS;
+        list.push({ s: tr[o], e: tr[o + 1], a: [tr[o + 3], tr[o + 2]], b: [tr[o + 5], tr[o + 4]], d: tr[o + 6], short: !!tr[o + 7],
+          bike: r.bikes[tr[o + 8]], from: stName(tr[o + 9]), to: stName(tr[o + 10]), route: undefined });
       }
       list.sort((x, y) => x.s - y.s);
+      list.forEach((t, k) => { t.k = k; });
       S.trips = list;
+      S.away = [];
+      for (let i = 0; i + 4 < r.openNow.length; i += 5) {
+        const o = r.openNow;
+        S.away.push({ bike: r.bikes[o[i]], since: o[i + 1], a: [o[i + 3], o[i + 2]], from: stName(o[i + 4]) });
+      }
       const m = new Map(r.pollT.map((x, k) => [x, r.inuse[k]]));
       T.inuse = T.t.map((x) => m.get(x) ?? 0);
       S.k.liveInuse = r.inuse[r.inuse.length - 1] ?? null;
@@ -721,44 +760,88 @@
     $('#tlRange').setAttribute('aria-valuetext', live ? 'Live' : fmtWhen(t));
   }
 
-  // ---- trips: moving dot plus fading trail along a curved line
-  function arcPoint(a, b, u) {
-    const [x0, y0] = a, [x1, y1] = b;
-    const mx = (x0 + x1) / 2, my = (y0 + y1) / 2, dx = x1 - x0, dy = (y1 - y0) * 1.58;
-    const cx = mx - dy * 0.16, cy = my + (dx * 0.16) / 1.58, v = 1 - u;
-    return [v * v * x0 + 2 * v * u * cx + u * u * x1, v * v * y0 + 2 * v * u * cy + u * u * y1];
+  // ---- trips active at the shown moment
+  // Past moment: every trip that started before and ended after it, drawn along
+  // its estimated route (dashed) with a dot at the estimated position.
+  // Live: the end of a running trip is unknown yet, so only where each bike
+  // left from (ring) is shown.
+  const lenAlong = (c) => { const L = [0]; for (let k = 1; k < c.length; k++) L.push(L[k - 1] + hav(c[k - 1][1], c[k - 1][0], c[k][1], c[k][0])); return L; };
+  function along(c, L, u) {
+    const want = u * L[L.length - 1];
+    let k = 1; while (k < L.length - 1 && L[k] < want) k++;
+    const f = (want - L[k - 1]) / Math.max(1e-9, L[k] - L[k - 1]);
+    return [c[k - 1][0] + f * (c[k][0] - c[k - 1][0]), c[k - 1][1] + f * (c[k][1] - c[k - 1][1])];
   }
-  function arcPath(a, b, u1 = 1, n = 16) { const p = []; for (let k = 0; k <= n; k++) p.push(arcPoint(a, b, (k / n) * u1)); return p; }
-
+  function partial(c, L, u) {
+    const want = u * L[L.length - 1], out = [c[0]];
+    for (let k = 1; k < c.length; k++) { if (L[k] >= want) { out.push(along(c, L, u)); break; } out.push(c[k]); }
+    return out;
+  }
+  let routeBusy = false;
+  async function fetchRoutes(list) {
+    if (routeBusy || !list.length) return;
+    routeBusy = true;
+    try {
+      const pairs = [];
+      for (const t of list) pairs.push(t.a[1], t.a[0], t.b[1], t.b[0]);
+      const r = await rpc('routes', { pairs });
+      list.forEach((t, k) => {
+        const x = r.ok ? r.list[k] : null;
+        t.route = x ? { c: x.c, L: lenAlong(x.c), len: x.len } : null;
+      });
+      S.routing = r.ok;
+    } catch (err) { console.warn('routes', err); list.forEach((t) => { if (t.route === undefined) t.route = null; }); }
+    finally { routeBusy = false; }
+    renderTrips(S.k.clock);
+  }
   function renderTrips(clock) {
     if (!styleReady) return;
     if (!S.trips || !S.layers.trips || S.mode !== 'karte') { setData('trips', EMPTY); setData('tripdots', EMPTY); return; }
-    const lines = [], dots = [];
-    const FADE = 25 * 60;
-    for (const tr of S.trips) {
-      if (tr.s > clock) break;
-      if (tr.e < clock - FADE) continue;
-      const dur = Math.max(60, tr.e - tr.s);
-      if (clock <= tr.e) {
-        const u = Math.min(1, Math.max(0.03, (clock - tr.s) / dur));
-        lines.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: arcPath(tr.a, tr.b, u, 12) }, properties: { o: 1 } });
-        dots.push({ type: 'Feature', geometry: { type: 'Point', coordinates: arcPoint(tr.a, tr.b, u) },
-          properties: { s: tr.s, e: tr.e, d: tr.d, ax: tr.a[0], ay: tr.a[1], bx: tr.b[0], by: tr.b[1], short: tr.short ? 1 : 0 } });
-      } else {
-        lines.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: arcPath(tr.a, tr.b, 1, 12) }, properties: { o: 0.2 + 0.55 * (1 - (clock - tr.e) / FADE) } });
+    const lines = [], dots = [], need = [];
+    if (S.k.isLive) {
+      for (const a of S.away || []) dots.push({ type: 'Feature', geometry: { type: 'Point', coordinates: a.a }, properties: { away: 1, bike: a.bike, since: a.since, from: a.from || '' } });
+    } else {
+      for (const tr of S.trips) {
+        if (tr.s >= clock) break;
+        if (tr.e <= clock) continue; // at a poll the bike is visible again, so only strictly between
+        const u = Math.min(1, Math.max(0, (clock - tr.s) / Math.max(60, tr.e - tr.s)));
+        if (tr.route === undefined) need.push(tr);
+        const R = tr.route;
+        const c = R ? R.c : [tr.a, tr.b], L = R ? R.L : lenAlong(c);
+        lines.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: c }, properties: { o: 0.35 } });
+        if (u > 0) lines.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: partial(c, L, u) }, properties: { o: 1 } });
+        dots.push({ type: 'Feature', geometry: { type: 'Point', coordinates: along(c, L, u) }, properties: { away: 0, k: tr.k } });
       }
     }
     setData('trips', { type: 'FeatureCollection', features: lines });
     setData('tripdots', { type: 'FeatureCollection', features: dots });
+    if (need.length) fetchRoutes(need.slice(0, 400));
+    const n = S.k.isLive ? (S.away || []).length : dots.length;
+    $('#tripsNote') && ($('#tripsNote').textContent = S.k.isLive
+      ? `${nf.format(n)} Räder sind gerade unterwegs (Ring = wo sie losgefahren sind; das Ziel ist erst bekannt, wenn sie wieder auftauchen).`
+      : `${nf.format(n)} Fahrten liefen um ${fTime.format(new Date(clock * 1000))} Uhr. Gestrichelt = geschätzter Weg.`);
   }
 
   function showTrip(p) {
+    if (+p.away) {
+      showDetail('#detail', `
+        <p class="kicker"><span class="dot" style="background:${C.trip}"></span>Gerade unterwegs</p>
+        <h3>Rad ${esc(p.bike)}</h3>
+        <dl class="kv"><dt>Losgefahren</dt><dd>${p.from ? esc(p.from) : 'frei abgestellt'}, etwa ${fTime.format(new Date(p.since * 1000))} Uhr</dd>
+          <dt>Ziel</dt><dd>noch unbekannt</dd></dl>
+        <div class="actions"><button class="btn sm" data-act="trail" data-id="${esc(p.bike)}">Verlauf anzeigen</button></div>`);
+      select({ type: 'Point', coordinates: [p.lng ?? 0, p.lat ?? 0] });
+      return;
+    }
+    const t = S.trips[+p.k]; if (!t) return;
     showDetail('#detail', `
-      <p class="kicker"><span class="dot" style="background:${C.trip}"></span>Geschätzte Fahrt</p>
-      <h3>${fmtDist(p.d)} Luftlinie</h3>
-      <dl class="kv"><dt>Von</dt><dd>${esc(nearestStationName(p.ax, p.ay))}</dd><dt>Nach</dt><dd>${esc(nearestStationName(p.bx, p.by))}</dd>
-        <dt>Zeit</dt><dd>${+p.short ? `zwischen ${fTime.format(new Date(p.s * 1000))} und ${fTime.format(new Date(p.e * 1000))} Uhr` : `etwa ${fTime.format(new Date(p.s * 1000))} bis ${fTime.format(new Date(p.e * 1000))} Uhr`}</dd></dl>
-      <p class="hint">Start und Ziel sind bekannt, der Weg dazwischen nicht. Die Linie verbindet nur die beiden Punkte.</p>`);
+      <p class="kicker"><span class="dot" style="background:${C.trip}"></span>Fahrt, geschätzt</p>
+      <h3>Rad ${esc(t.bike)}</h3>
+      <dl class="kv"><dt>Von</dt><dd>${t.from ? esc(t.from) : 'frei abgestellt'}</dd><dt>Nach</dt><dd>${t.to ? esc(t.to) : 'frei abgestellt'}</dd>
+        <dt>Zeit</dt><dd>${t.short ? 'zwischen' : 'etwa'} ${fTime.format(new Date(t.s * 1000))} und ${fTime.format(new Date(t.e * 1000))} Uhr</dd>
+        <dt>Strecke</dt><dd>${t.route ? `~${fmtDist(t.route.len)} (geschätzter Weg)` : `${fmtDist(t.d)} Luftlinie`}</dd></dl>
+      <p class="hint">Start und Ziel sind gemessen. Der Weg dazwischen ist der günstigste Radweg laut OpenStreetMap, nicht der tatsächlich gefahrene.</p>
+      <div class="actions"><button class="btn sm" data-act="trail" data-id="${esc(t.bike)}">Verlauf von Rad ${esc(t.bike)}</button></div>`);
   }
 
   // ---- scrubber (the last position is "Live")
@@ -869,7 +952,7 @@
       <dl class="kv">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
       <div class="actions">
         <a class="btn sm" href="${route}" target="_blank" rel="noopener">Route hierhin</a>
-        <button class="btn sm ghost" data-act="trail" data-id="${esc(b.bike)}">Weg anzeigen</button>
+        <button class="btn sm ghost" data-act="trail" data-id="${esc(b.bike)}">Verlauf anzeigen</button>
       </div>`);
     select({ type: 'Point', coordinates: [b.lng, b.lat] });
     flyTo([b.lng, b.lat]);
@@ -888,10 +971,13 @@
       <h3>${esc(st.name)}</h3>
       <dl class="kv">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
       ${docked.length ? `<div class="bikelist">${docked.slice(0, 60).map((b) => `<button data-act="bike" data-id="${esc(b.bike)}">${esc(b.bike)}</button>`).join('')}</div>` : ''}
-      <div id="stHist" class="sub"><span class="busy">Typischer Füllstand wird berechnet</span></div>
-      <div class="actions"><a class="btn sm" href="https://www.google.com/maps/dir/?api=1&destination=${st.lat},${st.lng}&travelmode=walking" target="_blank" rel="noopener">Route hierhin</a></div>`);
+      <div class="actions"><a class="btn sm" href="https://www.google.com/maps/dir/?api=1&destination=${st.lat},${st.lng}&travelmode=walking" target="_blank" rel="noopener">Route hierhin</a></div>
+      <h4 class="sect">Ankünfte und Abfahrten</h4><div id="stMoves"></div>
+      <h4 class="sect">Typischer Füllstand</h4><div id="stHist" class="sub"><span class="busy">wird berechnet</span></div>`);
     select({ type: 'Point', coordinates: [st.lng, st.lat] });
     flyTo([st.lng, st.lat]);
+    S.histWant = { type: 'station', uid: String(uid), at: [st.lng, st.lat], name: st.name };
+    loadStationMoves(String(uid), [st.lng, st.lat], st.name);
     stationQuery(String(uid), true, '#stHist').catch(() => { const el = $('#stHist'); if (el) el.innerHTML = ''; });
   }
 
@@ -903,7 +989,7 @@
       <p class="kicker"><span class="dot" style="background:${st ? C.station : C.free}"></span>${st ? 'An einer Station' : 'Frei abgestellt'}, ${fmtWhen(T.t[S.k.frame])}</p>
       <h3>Rad ${esc(id)}</h3>
       ${st ? `<dl class="kv"><dt>Station</dt><dd>${esc(st[1])}</dd></dl>` : ''}
-      <div class="actions"><button class="btn sm" data-act="trail" data-id="${esc(id)}">Weg anzeigen</button>
+      <div class="actions"><button class="btn sm" data-act="trail" data-id="${esc(id)}">Verlauf anzeigen</button>
       ${S.live?.byId.has(id) ? `<button class="btn sm ghost" data-act="livebike" data-id="${esc(id)}">Wo ist es jetzt?</button>` : ''}</div>`);
     select({ type: 'Point', coordinates: [lng, lat] });
   }
@@ -916,56 +1002,174 @@
       <p class="kicker"><span class="dot" style="background:${C.station}"></span>Station, ${fmtWhen(T.t[S.k.frame])}</p>
       <h3>${esc(s[1])}</h3>
       <dl class="kv"><dt>Räder</dt><dd>${list.length}</dd></dl>
-      ${list.length ? `<div class="bikelist">${list.slice(0, 60).map((b) => `<button data-act="tlbike" data-id="${esc(b)}">${esc(b)}</button>`).join('')}</div>` : ''}`);
+      ${list.length ? `<div class="bikelist">${list.slice(0, 60).map((b) => `<button data-act="tlbike" data-id="${esc(b)}">${esc(b)}</button>`).join('')}</div>` : ''}
+      <h4 class="sect">Ankünfte und Abfahrten</h4><div id="stMoves"></div>`);
     select({ type: 'Point', coordinates: [s[3], s[2]] });
+    S.histWant = { type: 'station', uid: String(s[0]), at: [s[3], s[2]], name: s[1] };
+    loadStationMoves(String(s[0]), [s[3], s[2]], s[1]);
   }
 
-  async function showTrailFor(id) {
-    if (S.mode !== 'karte') { setMode('karte', { trail: id }); return; }
-    let T;
-    try { T = await ensureTimeline(); } catch { toast('Der Verlauf ist noch nicht verfügbar.'); return; }
-    const i = T.bikeIndex.get(String(id));
-    if (i == null) { toast(`Rad ${id} kommt im Zeitraum der Zeitleiste nicht vor.`); return; }
-    const stays = [];
-    let present = false, last = null;
-    for (let f = 0; f < T.t.length; f++) {
-      const fr = T.frames[f];
-      let hit = -1;
-      for (let k = 0; k < fr.length; k += 4) if (fr[k] === i) { hit = k; break; }
-      if (hit >= 0) {
-        const lat = T.lat0 + fr[hit + 1] / T.scale, lng = T.lng0 + fr[hit + 2] / T.scale, pl = fr[hit + 3];
-        if (last && present && hav(last.lat, last.lng, lat, lng) < 60 && last.pl === pl) last.t1 = T.t[f];
-        else { last = { lat, lng, pl, t0: T.t[f], t1: T.t[f] }; stays.push(last); }
-        present = true;
-      } else if (T.reset[f] || T.gone[f].includes(i)) present = false;
-      else if (present && last) last.t1 = T.t[f];
-    }
-    if (!stays.length) { toast(`Rad ${id} kommt im Zeitraum der Zeitleiste nicht vor.`); return; }
-    S.trail = { id, stays };
-    setData('trail', { type: 'FeatureCollection', features: [
-      { type: 'Feature', geometry: { type: 'LineString', coordinates: stays.map((s) => [s.lng, s.lat]) }, properties: {} },
-      ...stays.map((s, k) => ({ type: 'Feature', geometry: { type: 'Point', coordinates: [s.lng, s.lat] }, properties: { k } })),
-    ] });
+  // ================================================================ history of one bike / one station
+  const HP = [[6, '6 Std.'], [24, '24 Std.'], [72, '3 Tage'], [168, '7 Tage']];
+  const maxHistH = () => Math.max(1, (S.cfg?.trail_max_days || 7) * 24);
+  const isoLocal = (t) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(t * 1000));
+  const dtLocal = (t) => { const d = new Date(t * 1000); const p = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; };
+  function histRange() {
+    const ref = S.k.isLive || !S.tl ? (S.live?.t || now()) : S.k.clock;
+    const t1 = S.hp.to ?? ref;
+    let t0 = S.hp.from ?? t1 - S.hp.h * 3600;
+    t0 = Math.max(t0, t1 - maxHistH() * 3600);
+    return [Math.floor(t0), Math.ceil(t1)];
+  }
+  const datesFor = (t0, t1) => (tlIndex || []).map((d) => d.date).filter((d) => d >= isoLocal(t0) && d <= isoLocal(t1));
+  function periodCtl() {
+    const custom = S.hp.from != null;
+    const [t0, t1] = histRange(), maxH = maxHistH();
+    return `<div class="hper">
+      <div class="seg sm" role="radiogroup" aria-label="Zeitraum">${HP.filter(([h]) => h <= maxH).map(([h, l]) =>
+        `<button role="radio" data-act="hper" data-h="${h}" aria-checked="${!custom && S.hp.h === h}">${l}</button>`).join('')}</div>
+      <details class="hcustom"${custom ? ' open' : ''}><summary>Eigener Zeitraum (höchstens ${maxH >= 48 ? `${Math.round(maxH / 24)} Tage` : `${maxH} Std.`})</summary>
+        <div class="dates"><label class="field">von <input type="datetime-local" id="hFrom" value="${dtLocal(t0)}"></label>
+        <label class="field">bis <input type="datetime-local" id="hTo" value="${dtLocal(t1)}"></label></div>
+        <button class="btn sm ghost" type="button" data-act="hcustom">Anwenden</button></details></div>`;
+  }
+  const HIST_LEGEND = `<div class="hlegend">
+    <span><i class="lg st"></i>an Station</span><span><i class="lg fr"></i>frei abgestellt</span>
+    <span><i class="lg snap"></i>Snapshot</span><span><i class="lg route"></i>Fahrt (Weg geschätzt)</span></div>`;
+
+  async function showTrailFor(id) { return showBikeHistory(id); }
+  async function showBikeHistory(id) {
+    if (S.mode !== 'karte') setMode('karte');
+    const token = S.histToken = {};
+    showDetail('#detail', `<p class="kicker">Verlauf</p><h3>Rad ${esc(id)}</h3>${periodCtl()}<div id="histBody"><span class="busy">wird geladen</span></div>`, { keepSel: true });
+    try { await ensureIndex(); } catch { $('#histBody').innerHTML = '<p class="hint">Noch kein Verlauf vorhanden.</p>'; return; }
+    const [t0, t1] = histRange();
+    let r;
+    try { r = await rpc('bikeTrail', { bike: String(id), t0, t1, P: tripParams(), dates: datesFor(t0, t1) }); }
+    catch (err) { if (S.histToken === token) $('#histBody').innerHTML = `<p class="hint">Fehler: ${esc(err.message.split('\n')[0])}</p>`; return; }
+    if (S.histToken !== token) return;
+    const items = [];
+    r.stays.forEach((st, k) => { items.push({ type: 'stay', ...st }); if (r.moves[k]) items.push({ type: 'move', ...r.moves[k] }); });
+    S.hist = { type: 'bike', id, items, routing: r.routing, leftAt: r.leftAt, polls: r.polls, t0, t1 };
+    drawHist(); renderBikeHist(); fitHist();
+  }
+
+  function drawHist(hi = -1) {
+    const H = S.hist; if (!H) { setData('hist', EMPTY); applyVisibility(); return; }
+    const f = [];
+    const dim = (n) => (hi >= 0 && n !== hi ? 1 : 0);
+    H.items.forEach((it, n) => {
+      if (it.type === 'stay') {
+        const dur = Math.max(0, it.t1 - it.t0);
+        if (it.pts && it.pts.length > 1) for (const p of it.pts) f.push({ type: 'Feature', geometry: { type: 'Point', coordinates: p }, properties: { kind: 'snap' } });
+        f.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [it.lng, it.lat] },
+          properties: { kind: 'stay', st: it.st >= 0 ? 1 : 0, r: Math.min(5, Math.max(0, Math.log2(1 + dur / 1800))), n, hi: n === hi ? 1 : 0, dim: dim(n) } });
+      } else {
+        const a = H.type === 'bike' ? H.items[n - 1] : null, b = H.type === 'bike' ? H.items[n + 1] : null;
+        const kind = it.kind === 'shift' ? 'shift' : it.route ? 'route' : 'air';
+        const c = it.route || (a && b ? [[a.lng, a.lat], [b.lng, b.lat]] : [it.a, it.b]);
+        f.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: c }, properties: { kind, n, hi: n === hi ? 1 : 0, dim: dim(n) } });
+        if (H.type === 'station') { // the other end of the trip
+          const o = it.out ? it.b : it.a;
+          f.push({ type: 'Feature', geometry: { type: 'Point', coordinates: o }, properties: { kind: 'stay', st: it.other ? 1 : 0, r: 0, n, hi: n === hi ? 1 : 0, dim: dim(n) } });
+        }
+      }
+    });
+    setData('hist', { type: 'FeatureCollection', features: f });
     applyVisibility();
+  }
+  function fitHist(n) {
+    const H = S.hist; if (!H) return;
     const b = new maplibregl.LngLatBounds();
-    stays.forEach((s) => b.extend([s.lng, s.lat]));
-    map.fitBounds(b, { padding: isDesktop() ? { left: 440, top: 60, right: 60, bottom: 60 } : { top: 70, left: 40, right: 40, bottom: sheetVisibleHeight() + 30 }, maxZoom: 15, duration: REDUCED ? 0 : 700 });
-    showTrail();
+    const add = (it) => {
+      if (it.type === 'stay') b.extend([it.lng, it.lat]);
+      else (it.route || [it.a, it.b].filter(Boolean)).forEach((p) => b.extend(p));
+    };
+    if (n != null) add(H.items[n]); else H.items.forEach(add);
+    if (H.type === 'station') b.extend(H.at);
+    if (b.isEmpty()) return;
+    map.fitBounds(b, { padding: isDesktop() ? { left: 440, top: 60, right: 60, bottom: 60 } : { top: 70, left: 40, right: 40, bottom: sheetVisibleHeight() + 30 },
+      maxZoom: 16, duration: REDUCED ? 0 : 600 });
+  }
+  function histFocus(n) {
+    const H = S.hist; if (!H || !H.items[n]) return;
+    drawHist(n); fitHist(n);
+    $$('#histBody [data-n]').forEach((el) => el.classList.toggle('on', +el.dataset.n === n));
+    const row = $(`#histBody [data-n="${n}"]`); if (row) row.scrollIntoView({ block: 'nearest', behavior: REDUCED ? 'auto' : 'smooth' });
+  }
+  const tm = (t) => fTime.format(new Date(t * 1000));
+  const dayTm = (t) => `${fDay.format(new Date(t * 1000))} ${tm(t)}`;
+
+  function renderBikeHist() {
+    const H = S.hist, el = $('#histBody'); if (!el) return;
+    const trips = H.items.filter((x) => x.type === 'move' && x.kind === 'trip');
+    const km = trips.reduce((a, x) => a + (x.len || x.d), 0);
+    const stays = H.items.filter((x) => x.type === 'stay');
+    const snaps = stays.reduce((a, x) => a + x.n, 0);
+    if (!stays.length) { el.innerHTML = '<p class="hint">In diesem Zeitraum nicht im Feed gesehen.</p>'; return; }
+    const rows = [];
+    if (H.leftAt) rows.push(`<li class="hrow now"><span class="ic route"></span><span class="main"><b>Seit ${tm(H.leftAt)} nicht im Feed</b><small>wahrscheinlich gerade unterwegs, Ziel noch unbekannt</small></span></li>`);
+    for (let n = H.items.length - 1; n >= 0; n--) {
+      const it = H.items[n];
+      if (it.type === 'stay') {
+        const dur = it.t1 - it.t0;
+        rows.push(`<li class="hrow" data-n="${n}"><button class="rowbtn" data-act="hfocus" data-n="${n}">
+          <span class="ic ${it.st >= 0 ? 'st' : 'fr'}"></span>
+          <span class="main"><b>${it.st >= 0 ? esc(it.name) : 'Frei abgestellt'}</b><small>${dayTm(it.t0)}${dur > 0 ? ` – ${tm(it.t1)}` : ''} · ${it.n} ${it.n === 1 ? 'Snapshot' : 'Snapshots'}</small></span>
+          <span class="val">${dur > 0 ? fmtDur(dur) : '–'}<small>abgestellt</small></span></button></li>`);
+      } else if (it.kind === 'trip') {
+        const dur = it.t1 - it.t0;
+        rows.push(`<li class="hrow trip" data-n="${n}"><button class="rowbtn" data-act="hfocus" data-n="${n}">
+          <span class="ic route"></span>
+          <span class="main"><b>${it.service ? 'Lange weg (Werkstatt oder Umverteilung?)' : 'Fahrt'}</b><small>${tm(it.t0)} → ${tm(it.t1)} · ${it.len ? `~${fmtDist(it.len)} Weg (geschätzt)` : `${fmtDist(it.d)} Luftlinie`}</small></span>
+          <span class="val">${it.absent ? fmtDur(Math.max(60, dur)) : '<small>zwischen 2 Abfragen</small>'}</span></button></li>`);
+      } else {
+        rows.push(`<li class="hrow shift" data-n="${n}"><button class="rowbtn" data-act="hfocus" data-n="${n}"><span class="ic shift"></span>
+          <span class="main"><small>um ${fmtDist(it.d)} versetzt (GPS-Ungenauigkeit oder kurz verschoben)</small></span></button></li>`);
+      }
+    }
+    el.innerHTML = `<div class="tiles small">
+        <div class="stat"><b>${trips.length}</b><span>Fahrten</span></div>
+        <div class="stat"><b>${trips.length ? `~${fmtDist(km)}` : '–'}</b><span>Weg, geschätzt</span></div>
+        <div class="stat"><b>${nf.format(snaps)}</b><span>Snapshots</span></div></div>
+      ${HIST_LEGEND}
+      ${H.routing ? '' : '<p class="hint">Straßennetz nicht verfügbar, Fahrten als gerade Linie.</p>'}
+      <ul class="rows hist">${rows.join('')}</ul>
+      <p class="hint">Ein Snapshot = eine Abfrage, in der das Rad zu sehen war (gespeichert wird eine Position nur, wenn es sich mehr als 25 m bewegt hat). Der Weg einer Fahrt ist geschätzt: der günstigste Radweg zwischen Start und Ziel laut OpenStreetMap.</p>
+      <div class="actions"><button class="btn sm ghost" data-act="cleartrail">Verlauf ausblenden</button></div>`;
   }
 
-  function showTrail() {
-    const tr = S.trail, T = S.tl; if (!tr || !T) return;
-    const name = (s) => (s.pl >= 0 ? esc(T.stations[s.pl][1]) : 'frei abgestellt');
-    const rows = tr.stays.slice().reverse().slice(0, 60).map((s) => `
-      <li><button class="rowbtn" data-act="frame" data-t="${s.t0}"><span class="dot" style="background:${s.pl >= 0 ? C.station : C.free}"></span>
-        <span class="main"><b>${name(s)}</b><small>${fDate.format(new Date(s.t0 * 1000))} ${fTime.format(new Date(s.t0 * 1000))} bis ${s.t1 === s.t0 ? '–' : fTime.format(new Date(s.t1 * 1000))}</small></span>
-        <span class="val">${fmtDur(Math.max(600, s.t1 - s.t0))}</span></button></li>`).join('');
-    showDetail('#detail', `
-      <p class="kicker">Weg im Zeitraum der Zeitleiste</p>
-      <h3>Rad ${esc(tr.id)}</h3>
-      <p class="hint">${tr.stays.length} Standorte. Antippen springt zu diesem Zeitpunkt.</p>
-      <ul class="rows">${rows}</ul>
-      <div class="actions"><button class="btn sm ghost" data-act="cleartrail">Weg ausblenden</button></div>`, { keepSel: true });
+  // ---- arrivals and departures of a station
+  async function loadStationMoves(uid, at, name) {
+    const box = $('#stMoves'); if (!box) return;
+    const token = S.histToken = {};
+    box.innerHTML = `${periodCtl()}<div id="histBody"><span class="busy">wird geladen</span></div>`;
+    try { await ensureIndex(); } catch { $('#histBody').innerHTML = '<p class="hint">Noch kein Verlauf vorhanden.</p>'; return; }
+    const [t0, t1] = histRange();
+    const dates = datesFor(t0, t1);
+    let r;
+    try { r = await rpc('stationMoves', { uid: String(uid), t0, t1, P: tripParams(), dates }); }
+    catch (err) { if (S.histToken === token) $('#histBody').innerHTML = `<p class="hint">Fehler: ${esc(err.message.split('\n')[0])}</p>`; return; }
+    if (S.histToken !== token) return;
+    const items = r.list.map((x) => ({ type: 'move', kind: 'trip', ...x }));
+    S.hist = { type: 'station', uid, at, items, routing: r.routing, name };
+    drawHist();
+    const ins = items.filter((x) => !x.out).length, outs = items.length - ins;
+    $('#histBody').innerHTML = !items.length ? '<p class="hint">Keine Ankünfte oder Abfahrten in diesem Zeitraum.</p>' : `
+      <p class="hsum"><b>${ins}</b> Ankünfte · <b>${outs}</b> Abfahrten</p>
+      ${HIST_LEGEND}
+      <ul class="rows hist">${items.slice(0, 120).map((it, n) => `<li class="hrow trip" data-n="${n}"><button class="rowbtn" data-act="hfocus" data-n="${n}">
+        <span class="ic ${it.out ? 'out' : 'in'}" aria-hidden="true">${it.out ? '↗' : '↘'}</span>
+        <span class="main"><b>Rad ${esc(it.bike)} ${it.out ? 'nach' : 'von'} ${it.other ? esc(it.other) : 'frei abgestellt'}</b>
+          <small>${dayTm(it.out ? it.s : it.e)} · ${it.len ? `~${fmtDist(it.len)} Weg (geschätzt)` : `${fmtDist(it.d)} Luftlinie`}</small></span></button>
+        <button class="mini" data-act="trail" data-id="${esc(it.bike)}" aria-label="Verlauf von Rad ${esc(it.bike)}">Verlauf</button></li>`).join('')}</ul>
+      ${items.length > 120 ? `<p class="hint">Die neuesten 120 von ${items.length}.</p>` : ''}
+      <div class="actions"><button class="btn sm ghost" data-act="cleartrail">Bewegungen ausblenden</button></div>`;
+    fitHist();
+  }
+  function reloadHist() {
+    if (S.hist?.type === 'bike' || S.histWant?.type === 'bike') showBikeHistory(S.hist?.id ?? S.histWant.id);
+    else if (S.hist?.type === 'station' || S.histWant?.type === 'station') { const w = S.hist || S.histWant; loadStationMoves(w.uid, w.at, w.name); }
   }
 
   // ---- near me
@@ -1727,6 +1931,7 @@
   function closeDetail(silent) {
     for (const el of $$('.detail')) { el.hidden = true; el.innerHTML = ''; }
     S.sel = null;
+    if (S.hist || S.histWant) { S.hist = null; S.histWant = null; S.histToken = null; if (styleReady) setData('hist', EMPTY); }
     if (styleReady) { select(null); setData('qpt', EMPTY); applyVisibility(); }
     if (!silent && !isDesktop() && sheetState === 'half') setSheet('peek');
   }
@@ -1966,7 +2171,16 @@
       else if (a === 'trail') showTrailFor(id);
       else if (a === 'tlbike') { const i = S.tl.bikeIndex.get(id); if (i != null) showTlBike(i); }
       else if (a === 'livebike') { goLive(); showBike(id); }
-      else if (a === 'cleartrail') { S.trail = null; setData('trail', EMPTY); applyVisibility(); closeDetail(); }
+      else if (a === 'cleartrail') { S.hist = null; S.histWant = null; setData('hist', EMPTY); applyVisibility(); closeDetail(); }
+      else if (a === 'hfocus') histFocus(+el.dataset.n);
+      else if (a === 'hper') { S.hp = { h: +el.dataset.h, from: null, to: null }; reloadHist(); }
+      else if (a === 'hcustom') {
+        const f = Date.parse($('#hFrom').value) / 1000, t = Date.parse($('#hTo').value) / 1000;
+        if (!(f < t)) { toast('Der Beginn muss vor dem Ende liegen.'); return; }
+        const maxS = maxHistH() * 3600;
+        if (t - f > maxS) toast(`Höchstens ${Math.round(maxHistH() / 24)} Tage, der Beginn wurde angepasst.`);
+        S.hp = { h: S.hp.h, from: Math.max(f, t - maxS), to: t }; reloadHist();
+      }
       else if (a === 'frame') { const i = nearestFrame(+el.dataset.t); $('#tlRange').value = i; setFrame(i); }
       else if (a === 'stq') stationQuery(id);
       else if (a === 'pointme' && S.me) {
@@ -2031,6 +2245,6 @@
     initMap(S.cfg);
   }
   window.__app = S; Object.defineProperty(window, '__map', { get: () => map });
-  window.__ui = { setMode, setSheet, showStation, showBike, pointQuery, stationQuery, flyTo, setFrame, startPlay, stopPlay, goLive };
+  window.__ui = { setMode, setSheet, showStation, showBike, showTlStation, showBikeHistory, pointQuery, stationQuery, flyTo, setFrame, startPlay, stopPlay, goLive };
   start();
 })();

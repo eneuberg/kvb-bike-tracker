@@ -64,6 +64,7 @@ class Config:
 
     # Behaviour
     update_interval_seconds: int = 900
+    update_jitter_seconds: int = 30   # serve mode: each wait is interval +- up to this, at random
     move_threshold_m: float = 25.0
     battery_threshold: int = 5
     request_timeout: int = 30
@@ -96,7 +97,9 @@ class Config:
     port: int = 8080
     # serve mode: anyone can trigger a poll from the web page, but for all
     # visitors together at most once per this many seconds (0 = off)
-    manual_min_interval_seconds: int = 180
+    manual_min_interval_seconds: int = 60
+    trail_max_days: float = 7  # longest period the page offers for one bike's / station's history
+    graph_file: Path | None = None  # routing graph; default: <data>/osm, then the image's seed
     serving: bool = False  # set by `serve`; static builds (GitHub Pages) cannot poll on demand
 
     @classmethod
@@ -130,5 +133,8 @@ class Config:
             timeline_step_minutes=float(_env("TIMELINE_STEP_MINUTES", "5")),
             analysis_interval_minutes=float(_env("ANALYSIS_INTERVAL_MINUTES", "30")),
             port=int(_env("PORT", "8080")),
-            manual_min_interval_seconds=max(0, int(float(_env("MANUAL_REFRESH_MINUTES", "3")) * 60)),
+            manual_min_interval_seconds=max(0, int(float(_env("MANUAL_REFRESH_MINUTES", "1")) * 60)),
+            update_jitter_seconds=max(0, int(float(_env("UPDATE_JITTER_SECONDS", "30")))),
+            trail_max_days=max(0.25, float(_env("TRAIL_MAX_DAYS", "7"))),
+            graph_file=Path(_env("GRAPH_FILE")) if _env("GRAPH_FILE") else None,
         )

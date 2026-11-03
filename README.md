@@ -6,7 +6,7 @@ Tracks every KVB-Rad bike in Köln via the public nextbike live API. It draws a 
 
 | View | What it shows |
 |---|---|
-| **Karte** | One timeline from the past up to *now* (the right end is live). Stations with counts, free-floating bikes, optional density, and estimated trips as dots travelling from start to destination. Press play to watch where bikes flow; tap a bike for details, "untouched since" and its path over the last days. |
+| **Karte** | One timeline from the past up to *now* (the right end is live). Stations with counts, free-floating bikes and the trips running at the shown moment: live, a ring where each bike on the road left from (its destination is unknown until it reappears); in the past, a dashed line along the estimated route and a dot at the estimated position. Tap a bike for its history over a chosen period (up to `TRAIL_MAX_DAYS`): where it was parked (station / free), every snapshot, and each trip along its estimated route. Tap a station for its arrivals and departures with routes. |
 | **Analyse** | Computed in your browser from the raw history, with free filters (date range, weekdays, time window from 00:00 to 24:00; small bars above the slider show at which times polls exist) and per-view parameters. A status line under the slider always says what a result is based on, or why it is empty. *Erreichbarkeit*: typical walking distance to the nearest bike (50 m raster) or chance of a bike within a chosen radius; tap anywhere for an exact profile. *Dichte*: average parked bikes per hectare. *Ströme*: most frequent connections with animated direction, net in/outflow per area (area size adjustable). *Nutzung*: bikes in use, trips per hour, duration, distance. *Stationen*: typical fill level and chance of being empty. *Standzeit*: how long bikes stand untouched, minutes to days. Each view explains how it is computed. |
 
 The map uses MapLibre GL with [OpenFreeMap](https://openfreemap.org) vector tiles (free, no key), so markers and heatmaps scale smoothly while zooming. It works on phones (bottom sheet) and desktop (side panel), in light and dark mode.
@@ -75,16 +75,18 @@ On the first start with an empty volume, the container copies the history that G
 
 | env var | default | description |
 |---|---|---|
-| `UPDATE_INTERVAL_MINUTES` | `13` | poll interval in minutes (fractions allowed, minimum 1); 13 is prime, so it doesn't lock onto hourly patterns |
-| `MANUAL_REFRESH_MINUTES` | `3` | container only: visitors can trigger a poll from the page, for all visitors together at most once per this many minutes (`0` = off). The automatic schedule counts from the latest poll, manual or not |
+| `UPDATE_INTERVAL_MINUTES` | `4` in compose (`15` otherwise) | poll interval in minutes (fractions allowed, minimum 1) |
+| `UPDATE_JITTER_SECONDS` | `30` | container only: each wait varies by up to ± this many seconds |
+| `TRAIL_MAX_DAYS` | `7` | longest period the page offers for one bike's or station's history |
+| `MANUAL_REFRESH_MINUTES` | `1` | container only: visitors can trigger a poll from the page, for all visitors together at most once per this many minutes (`0` = off). The automatic schedule counts from the latest poll, manual or not |
 | `NEXTBIKE_DOMAIN` | `kg` | nextbike network ID (`kg` = KVB-Rad Köln) |
 | `NEXTBIKE_CITY_ID` | – | restrict to one nextbike city UID instead |
 | `MOVE_THRESHOLD_M` | `25` | movement threshold for `moved` events |
 | `RENDER_PNG` | `true` | render `map.png` / `heatmap.png` on each update |
 | `TILE_API_KEY` | – | free [CARTO basemap key](https://carto.com/basemaps/apikey) for the PNG renders; see *Basemap* below |
 | `ANALYSIS_DAYS` | `56` | how many days of history the web app can load (Verlauf and Analyse) |
-| `TIMELINE_STEP_MINUTES` | `5` | minimum spacing of exported polls (matters for 1-minute polling) |
-| `ANALYSIS_INTERVAL_MINUTES` | `13` in compose (`30` otherwise) | container only: rebuild the timeline/analysis files at most this often |
+| `TIMELINE_STEP_MINUTES` | `2` in compose (`5` otherwise) | polls closer than this are merged in the timeline files (the CSV history keeps all) |
+| `ANALYSIS_INTERVAL_MINUTES` | `4` in compose (`30` otherwise) | container only: rebuild the timeline/analysis files at most this often |
 
 The container serves `/` (interactive map), `/map.png`, `/heatmap.png`, `/latest.json` (current state), `/status.json` (time of the latest poll and app version) and `/history/` (all CSVs).
 
@@ -111,5 +113,6 @@ The tests use a synthetic feed and need no network.
 - **Data source:** `api.nextbike.net/maps/nextbike-live.json`. It's public but undocumented, so nextbike can change it without notice. Use moderate poll intervals.
 - **Rentals are inferred:** the feed shows only parked bikes, not rides. "Trips" come from `gone` → `new` pairs and are therefore approximations.
 - **Analysis method:** `tracker/analysis.py` replays the CSV history and writes one compact file per day (`tl/YYYY-MM-DD.json`: full state at the first poll, then per-poll changes). `tracker/web/worker.js` loads the selected days in a Web Worker and computes everything there. Walking distance uses an exact Euclidean distance transform per poll; the stepped colours are classified on a 3–4× interpolated raster with anti-aliased edges, so the bands are round. Tap queries are computed exactly for the point. Trips are inferred: a bike leaves the feed and reappears at least *x* m away (default 100 m; absences over 4 h count as service), or jumps more than *y* m between two polls (default 300 m). Movements across a gap of more than an hour between two polls (missed runs) are not counted, because their time is unknown. Rebalancing by van can't be separated reliably. Hours use Europe/Berlin local time; public holidays count as normal weekdays.
+- **Routes are estimated:** the feed only has start and end. `tools/build_graph.py` (run monthly by `.github/workflows/graph.yml`) builds a bicycle graph of Köln from OpenStreetMap (© OpenStreetMap contributors, ODbL): cycleways preferred, busy roads, rough surfaces and pushing penalised, one-ways respected. The browser routes each trip with A* (about 1 ms per route) between the snapped start and end. This is the cheapest plausible way, not the way actually ridden.
 - **Basemap:** CARTO now requires a free API key ([request one](https://carto.com/basemaps/apikey)). The interactive map uses OpenFreeMap. With `TILE_API_KEY` set, the PNG renders use CARTO light tiles (© OpenStreetMap contributors © CARTO; free up to 5M non-commercial requests/month). Without a key the PNGs are drawn without a basemap. OSM's [tile policy](https://operations.osmfoundation.org/policies/tiles/) forbids pre-fetching tiles server-side.
 - **Schedule:** in public repos, GitHub pauses scheduled workflows after 60 days without repo activity. The history commits should keep this repo active.
