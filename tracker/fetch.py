@@ -32,8 +32,8 @@ def fetch_raw(cfg: Config) -> dict[str, Any]:
             resp = requests.get(url, params=params, headers=headers, timeout=cfg.request_timeout)
             resp.raise_for_status()
             # transfer size (compressed, if the server compresses) vs. payload size
-            wire = resp.raw.tell() if hasattr(resp.raw, "tell") else None
-            log.info("feed: %s bytes on the wire, %s bytes JSON (%s)", wire, len(resp.content),
+            log.info("feed: %s bytes on the wire (Content-Length), %s bytes JSON (%s)",
+                     resp.headers.get("Content-Length", "?"), len(resp.content),
                      resp.headers.get("Content-Encoding", "uncompressed"))
             data = resp.json()
             if not isinstance(data, dict) or "countries" not in data:
