@@ -194,10 +194,10 @@
       paint: { 'fill-color': hexA(C.ink, 0.06) } }, before);
 
     // trips under everything else: one line per street section, thicker = more trips
-    map.addLayer({ id: 'trips-glow', type: 'line', source: 'trips', filter: ['>=', ['get', 'w'], 7], layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' },
+    map.addLayer({ id: 'trips-glow', type: 'line', source: 'trips', filter: ['>=', ['get', 'w'], 6], layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' },
       paint: { 'line-width': ['interpolate', ['linear'], ['zoom'], 10, ['*', 2.2, ['get', 'w']], 16, ['*', 5, ['get', 'w']]],
         'line-blur': ['interpolate', ['linear'], ['zoom'], 10, 4, 16, 10], 'line-color': ['to-color', ['get', 'col']],
-        'line-opacity': ['interpolate', ['linear'], ['get', 'w'], 7, DARK ? 0.1 : 0.06, 8, DARK ? 0.2 : 0.12] } });
+        'line-opacity': ['interpolate', ['linear'], ['get', 'w'], 6, DARK ? 0.1 : 0.06, 8, DARK ? 0.26 : 0.16] } });
     map.addLayer({ id: 'trips-line', type: 'line', source: 'trips', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round', 'line-sort-key': ['get', 'w'] },
       paint: { 'line-width': ['interpolate', ['linear'], ['zoom'], 10, ['+', 0.9, ['*', 0.5, ['get', 'w']]], 13, ['+', 1.4, ['*', 0.95, ['get', 'w']]], 16, ['+', 2, ['*', 1.7, ['get', 'w']]]],
         'line-color': ['to-color', ['get', 'col']],
@@ -929,10 +929,10 @@
   const intensity = (n, maxN) => (maxN > 1 ? Math.log(n) / Math.log(maxN) : 0);
   const wOf = (n, maxN) => Math.max(0, Math.min(W_CLS - 1, Math.round(Math.min(1, intensity(n, maxN)) * (W_CLS - 1)), 2 * wCls(n) + 1));
   let tripRef = 2, tripLoad = null; // reference count; trips in the window relative to average
-  const GLOW = DARK ? { to: '#ffffff', k: [0, 0.2, 0.38, 0.58] } : { to: null, k: [0, 0.18, 0.32, 0.46] };
+  const GLOW = DARK ? { to: '#ffffff', k: [0, 0.25, 0.46, 0.69] } : { to: null, k: [0, 0.21, 0.37, 0.53] };
   const glowCache = new Map();
   function glowCol(col, f) {
-    const q = f < 0.78 ? 0 : Math.min(3, 1 + Math.floor(((f - 0.78) / 0.22) * 3));
+    const q = f < 0.74 ? 0 : Math.min(3, 1 + Math.floor(((f - 0.74) / 0.26) * 3));
     if (!q) return col;
     const key = `${col}|${q}`;
     let v = glowCache.get(key);

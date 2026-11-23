@@ -551,11 +551,17 @@ button { cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .seg.xs button { padding: 0 4px; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .seg button:not([aria-checked="true"]) { background: var(--surface-2); } }
 :root[data-theme="dark"] .seg button:not([aria-checked="true"]) { background: var(--surface-2); }
-/* layer tiles: a switch mark top right, filled with a tick when shown */
-.lt { --tick: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4.2 8.4l2.4 2.4 5.2-5.4' fill='none' stroke='white' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
-@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .lt { --tick: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4.2 8.4l2.4 2.4 5.2-5.4' fill='none' stroke='%23171c26' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); } }
-.lt::after { content: ""; position: absolute; top: 5px; right: 5px; width: 13px; height: 13px; border-radius: 50%; box-sizing: border-box;
-  border: 1.5px solid var(--muted); background: transparent; }
-.lt.on::after { border-color: var(--ink); background: var(--ink) var(--tick) center / 100% no-repeat; }
-.lt b { font-size: 18px; padding-right: 14px; }
-@media (max-width: 370px) { .lt b { font-size: 16px; } .lt::after { width: 13px; height: 13px; top: 5px; right: 5px; } }
+/* layer tiles: a real on/off switch top right, so they read as buttons, not as statistics */
+.lt { border: 1px solid var(--line); }
+.lt:not(.on) { border-style: dashed; }
+.ltiles { container-type: inline-size; }
+.lt::before { content: ""; position: absolute; top: 7px; right: 6px; width: 20px; height: 12px; border-radius: 6px;
+  background: color-mix(in srgb, var(--muted) 45%, transparent); transition: background .15s; }
+.lt::after { content: ""; position: absolute; top: 9px; right: 16px; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--surface); box-shadow: 0 1px 1px rgba(0, 0, 0, .25); transition: right .15s; }
+.lt.on::before { background: var(--ink); }
+.lt.on::after { right: 8px; }
+/* the number shrinks with the tile width, so "1.400" never runs into the switch */
+.lt b { font-size: 16px; font-size: clamp(13px, calc(8.6cqw - 15px), 19px); padding-right: 22px; white-space: nowrap; }
+.lt[data-layer="avail"] .av-ic { padding-right: 22px; }
+@container (max-width: 340px) { .lt span .sw { display: none; } }
