@@ -48,14 +48,9 @@
         <p id="status" class="status"><span class="pulse" aria-hidden="true"></span><span id="statusText">lädt …</span></p>
       </div>
     </div>
-    <nav class="modes" role="tablist" aria-label="Ansicht">
-      <button role="tab" data-mode="karte" aria-selected="true">Karte</button>
-      <button role="tab" data-mode="analyse" aria-selected="false">Analyse</button>
-    </nav>
   </header>
 
   <div class="scroll" id="scroll">
-    <!-- KARTE: live + history on one timeline -------------------------- -->
     <section class="mode" data-mode="karte">
       <div class="peek">
         <div class="scrub" id="scrub">
@@ -79,26 +74,72 @@
           <div class="stat fr"><b id="sFree">–</b><span>frei</span></div>
           <div class="stat tr"><b id="sUse">–</b><span>unterwegs</span></div>
         </div>
-        <button class="more-toggle" type="button" data-act="sheet"><span>Ebenen, Suche, Zeitraum</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg></button>
+        <div class="chips layers" id="layers" role="group" aria-label="Ebenen">
+          <button class="chip on" data-layer="stations" aria-pressed="true"><i class="sw st"></i>Stationen</button>
+          <button class="chip on" data-layer="free" aria-pressed="true"><i class="sw fr"></i>Frei</button>
+          <button class="chip on" data-layer="trips" aria-pressed="true"><i class="sw tr"></i>Fahrten</button>
+          <button class="chip" data-layer="avail" aria-pressed="false"><i class="sw av"></i>Verfügbarkeit</button>
+        </div>
+        <div class="ctx" id="ctx"></div>
+        <button class="more-toggle" type="button" data-act="sheet"><span>Einstellungen, Statistik, Suche</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg></button>
       </div>
       <div class="detail" id="detail" hidden></div>
-      <div class="more">
-        <div class="block">
-          <h2>Ebenen</h2>
-          <div class="chips" id="layers">
-            <button class="chip on" data-layer="stations" aria-pressed="true"><i class="sw st"></i>Stationen</button>
-            <button class="chip on" data-layer="free" aria-pressed="true"><i class="sw fr"></i>Freie Räder</button>
-            <button class="chip on" data-layer="trips" aria-pressed="true"><i class="sw tr"></i>Fahrten</button>
-            <button class="chip" data-layer="heat" aria-pressed="false"><i class="sw ht"></i>Dichte</button>
-          </div>
-          <p class="hint" id="tripsNote">Fahrten: nur die, die zum gezeigten Zeitpunkt laufen.</p>
-          <p class="hint">Live sind gerade fahrende Räder nicht im Feed: Der lila Ring zeigt, wo sie losgefahren sind. In der Vergangenheit ist auch das Ziel bekannt, dann zeigt die gestrichelte Linie den geschätzten Weg und der Punkt die geschätzte Position. Den ganzen Verlauf eines Rads oder einer Station siehst du, wenn du sie antippst.</p>
+      <div class="more" id="more">
+        <div class="block set" id="setTrips">
+          <h2>Fahrten</h2>
+          <div class="row"><h3>Zeitfenster bis zum gezeigten Zeitpunkt</h3>
+            <div class="seg sm" role="radiogroup" data-set="win">
+              <button role="radio" data-v="15">15 Min.</button><button role="radio" data-v="60">1 Std.</button>
+              <button role="radio" data-v="180">3 Std.</button><button role="radio" data-v="1440">24 Std.</button></div></div>
+          <div class="row"><h3>Farbe</h3>
+            <div class="seg sm" role="radiogroup" data-set="color">
+              <button role="radio" data-v="dir">Start → Ziel</button><button role="radio" data-v="dur">Dauer</button><button role="radio" data-v="freq">Häufigkeit</button></div>
+            <p class="hint">Häufigkeit: wie viele angekommene Fahrten (geschätzte Wege) über jeden Straßenabschnitt liefen. Zeigt die Hauptachsen.</p></div>
+          <label class="toggle"><input type="checkbox" id="setAway"> <span>Live: gerade losgefahrene Räder zeigen</span></label>
+          <div class="tlegend" id="tripLegend"></div>
+          <details class="explain"><summary>Was wird gezeigt?</summary>
+            <p>Der Feed zeigt nur abgestellte Räder. Verschwindet ein Rad und taucht woanders wieder auf, ist das eine <b>geschätzte Fahrt</b>.</p>
+            <ul><li><b>Angekommen</b> im Zeitfenster: ganzer Weg.</li>
+              <li><b>Läuft</b> zum gezeigten Zeitpunkt (nur im Rückblick, das Ziel ist dann bekannt): der Weg bis zur geschätzten Position. Beispiel: 17:10 los, 17:40 an, Zeitpunkt 17:30 = zwei Drittel des Wegs.</li>
+              <li><b>Live</b> ist das Ziel noch unbekannt: nur ein Ring, wo das Rad losgefahren ist, gefärbt nach bisheriger Dauer.</li></ul>
+            <p>Start und Ziel sind gemessen, der Weg dazwischen ist der günstigste Radweg laut OpenStreetMap (A*-Suche), nicht der tatsächlich gefahrene. Start- und Endzeit sind nur so genau wie der Abstand der Abfragen.</p>
+            <p>Strecke oder Punkt antippen öffnet das Profil des Rads.</p></details>
+        </div>
+        <div class="block set" id="setAvail">
+          <h2>Verfügbarkeit</h2>
+          <p class="hint top">Wie gut man an einem Ort ein Rad findet, zur Uhrzeit des Zeitfensters, gemittelt über mehrere Tage.</p>
+          <div class="row"><h3>Messgröße</h3>
+            <div class="seg sm" role="radiogroup" data-set="metric">
+              <button role="radio" data-v="prob">Chance</button><button role="radio" data-v="median">Laufweg</button><button role="radio" data-v="density">Räder/ha</button></div></div>
+          <div class="row" id="rowR"><h3>Umkreis</h3><div class="chips tight" data-set="R"></div></div>
+          <div class="row"><h3>Auflösung</h3>
+            <div class="seg sm" role="radiogroup" data-set="res">
+              <button role="radio" data-v="10">10 m</button><button role="radio" data-v="25">25 m</button><button role="radio" data-v="50">50 m</button></div>
+            <p class="hint" id="resHint"></p></div>
+          <div class="row"><h3>Über wie viele Tage</h3>
+            <div class="seg sm" role="radiogroup" data-set="days">
+              <button role="radio" data-v="7">7</button><button role="radio" data-v="14">14</button><button role="radio" data-v="28">28</button><button role="radio" data-v="56">56</button></div></div>
+          <div class="row"><h3>Wochentage</h3>
+            <div class="seg sm" role="radiogroup" data-set="wd">
+              <button role="radio" data-v="all">Alle</button><button role="radio" data-v="wk">Mo–Fr</button><button role="radio" data-v="we">Sa/So</button></div></div>
+          <p class="hint" id="availBasis"></p>
+          <details class="explain"><summary>Chance, Laufweg, Räder/ha: was ist der Unterschied?</summary>
+            <p>Alle drei beschreiben dieselbe Verteilung der Räder, betonen aber anderes:</p>
+            <ul><li><b>Chance</b>: Anteil der Abfragen, in denen mindestens ein Rad im Umkreis stand. Beantwortet „finde ich hier eins?“.</li>
+              <li><b>Laufweg</b>: typische Luftlinie zum nächsten Rad (Median über die Abfragen).</li>
+              <li><b>Räder/ha</b>: wie viele Räder im Schnitt pro Hektar stehen. Eine Station mit 20 Rädern zählt hier 20-mal, bei der Chance nur einmal.</li></ul>
+            <p>Ort auf der Karte antippen zeigt alle drei Werte für genau diesen Punkt, mit Tagesverlauf.</p>
+            <p>Unter 25 m wird es nicht genauer: Bewegungen unter 25 m werden nicht gespeichert, und GPS streut um etwa 10 m. 10 m rechnet deshalb nur den sichtbaren Ausschnitt.</p></details>
         </div>
         <div class="block">
-          <h2>Zeitraum der Zeitleiste</h2>
-          <div class="seg" id="tlSpan" role="radiogroup" aria-label="Zeitraum">
-            <button role="radio" data-h="6" aria-checked="false">6 h</button>
-            <button role="radio" data-h="24" aria-checked="true">24 h</button>
+          <details class="explain" id="statsBox"><summary>Statistik: Fahrten, Dauer, Standzeit</summary><div id="statsOut"><span class="busy">rechnet</span></div></details>
+          <details class="explain" id="tripParams"><summary>Wann zählt etwas als Fahrt?</summary><div id="tripParamsOut"></div></details>
+        </div>
+        <div class="block">
+          <h2>Zeitleiste</h2>
+          <div class="seg sm" id="tlSpan" role="radiogroup" aria-label="Länge der Zeitleiste">
+            <button role="radio" data-h="6" aria-checked="false">6 Std.</button>
+            <button role="radio" data-h="24" aria-checked="true">24 Std.</button>
             <button role="radio" data-h="72" aria-checked="false">3 Tage</button>
             <button role="radio" data-h="168" aria-checked="false">7 Tage</button>
           </div>
@@ -115,49 +156,14 @@
         <div class="block">
           <h2>In deiner Nähe</h2>
           <div id="near"><button class="btn-wide" id="btnNear" type="button">Standort verwenden</button>
-          <p class="hint">Zeigt die nächsten Räder und wie weit du hier normalerweise laufen musst.</p></div>
+          <p class="hint">Zeigt die nächsten Räder und wie gut man hier normalerweise eins findet.</p></div>
         </div>
         <div class="block about">
-          <p>* „unterwegs“ ist geschätzt: Räder, die aus dem Feed verschwinden und später woanders auftauchen. Räder in Benutzung sind im Feed selbst nicht sichtbar.</p>
-          <p>Daten: öffentliche Live-Schnittstelle von nextbike (KVB-Rad), etwa alle 13 Minuten abgefragt.</p>
+          <p>„Unterwegs“ ist geschätzt: Räder, die aus dem Feed verschwinden und später woanders auftauchen. Räder in Benutzung sind im Feed selbst nicht sichtbar.</p>
+          <p>Daten: öffentliche Live-Schnittstelle von nextbike (KVB-Rad). Straßennetz: © OpenStreetMap-Mitwirkende (ODbL).</p>
           <p><a href="history/">Rohdaten (CSV)</a> <a id="repoLink" href="#">Quellcode</a></p>
         </div>
       </div>
-    </section>
-
-    <!-- ANALYSE --------------------------------------------------------- -->
-    <section class="mode" data-mode="analyse" hidden>
-      <div class="peek">
-        <div class="tabs" id="aTabs" role="tablist" aria-label="Auswertung">
-          <button role="tab" data-tab="erreichbarkeit" aria-selected="true">Erreichbarkeit</button>
-          <button role="tab" data-tab="dichte" aria-selected="false">Dichte</button>
-          <button role="tab" data-tab="stroeme" aria-selected="false">Ströme</button>
-          <button role="tab" data-tab="nutzung" aria-selected="false">Nutzung</button>
-          <button role="tab" data-tab="stationen" aria-selected="false">Stationen</button>
-          <button role="tab" data-tab="standzeit" aria-selected="false">Standzeit</button>
-        </div>
-        <p class="lead" id="aLead"></p>
-        <div class="timebar" id="timeBar">
-          <button class="play" id="wPlay" type="button" aria-label="Zeitfenster durch den Tag laufen lassen">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path class="i-play" d="M8 5.5v13l11-6.5z"/><path class="i-pause" d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z"/></svg>
-          </button>
-          <div class="tw-main">
-            <div class="tw-label"><b id="wLabel">08:00–09:00</b><span id="wDays">alle Tage</span></div>
-            <div class="dual" id="wDual">
-              <svg class="cov" id="wCov" viewBox="0 0 96 10" preserveAspectRatio="none" aria-hidden="true"></svg>
-              <div class="dual-fill" id="wFill"></div>
-              <input type="range" id="wA" min="0" max="96" step="1" value="32" aria-label="Zeitfenster Beginn">
-              <input type="range" id="wB" min="0" max="96" step="1" value="36" aria-label="Zeitfenster Ende">
-            </div>
-            <div class="ticks hours" aria-hidden="true"><span>0</span><span>6</span><span>12</span><span>18</span><span>24</span></div>
-          </div>
-        </div>
-        <div class="astatus" id="aStatus" aria-live="polite"></div>
-        <div class="legend" id="aLegend"></div>
-        <button class="more-toggle" type="button" data-act="sheet"><span id="fSumText">Filter und Erklärung</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg></button>
-      </div>
-      <div class="detail" id="detailA" hidden></div>
-      <div class="more" id="aMore"></div>
     </section>
   </div>
 </aside>

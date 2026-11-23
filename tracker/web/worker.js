@@ -226,8 +226,8 @@ function avail({ F, dates, R, res: want, stops }) {
 }
 
 // average bikes per cell, smoothed (kernel density)
-function density({ F, dates, res, smooth, stops }) {
-  const g = grid(res, activeBBox(dates));
+function density({ F, dates, res, smooth, stops, bb }) {
+  const g = grid(res, areaBBox(dates, bb));
   const NC = g.W * g.H, sum = new Float32Array(NC);
   let polls = 0;
   const seenDays = new Set();
@@ -520,10 +520,19 @@ function edt2d(a, W, H) {
   }
 }
 
-function reachCompute({ F, dates, res, maxPolls = 150 }) {
-  const key = `${JSON.stringify(F)}|${dates.join(',')}|${res}|${maxPolls}`;
+// area to compute: the given view (fine resolutions) or where the bikes are
+function areaBBox(dates, bb) {
+  const a = activeBBox(dates);
+  if (!bb) return a;
+  const c = { s: Math.max(a.s, bb.s), n: Math.min(a.n, bb.n), w: Math.max(a.w, bb.w), e: Math.min(a.e, bb.e) };
+  return c.s < c.n && c.w < c.e ? c : a;
+}
+function reachCompute({ F, dates, res, maxPolls = 150, bb }) {
+  const g = grid(res, areaBBox(dates, bb)), NC = g.W * g.H, NB = EDGES.length + 1;
+  // time budget: about 60 million cell updates; finer rasters use fewer polls
+  maxPolls = Math.max(24, Math.min(maxPolls, Math.floor(6e7 / NC)));
+  const key = `${JSON.stringify(F)}|${dates.join(',')}|${res}|${maxPolls}|${JSON.stringify(g.bb)}`;
   if (reachCache.key === key) return reachCache;
-  const g = grid(res, activeBBox(dates)), NC = g.W * g.H, NB = EDGES.length + 1;
   const hist = new Uint16Array(NC * NB);
   const dist = new Float32Array(NC);
   const CAP = 2500;
@@ -616,8 +625,8 @@ function classify(g, vals, classes, transparentIf) {
   return out;
 }
 
-function reach({ F, dates, res, metric, R, classes }) {
-  const c = reachCompute({ F, dates, res });
+function reach({ F, dates, res, metric, R, classes, bb }) {
+  const c = reachCompute({ F, dates, res, bb });
   const { g, hist, polls } = c, NC = g.W * g.H, NB = EDGES.length + 1;
   const vals = new Float32Array(NC);
   if (metric === 'prob') {
@@ -852,6 +861,7 @@ function routeNow(g, lat0, lng0, lat1, lng1) {
     }
   }
   let pts;
+  const ed = [A.e];
   const sameEdge = A.e === B.e && Math.abs(B.along - A.along) * (B.along >= A.along ? g.cf[A.e] : g.cr[A.e]) <= best + 1e-6;
   if (bestEnd < 0 || sameEdge) {
     if (A.e !== B.e) return null;
@@ -870,11 +880,13 @@ function routeNow(g, lat0, lng0, lat1, lng1) {
     pts = n === g.eu[A.e] ? edgePart(g, A.e, A.along, 0) : edgePart(g, A.e, A.along, Le);
     for (let i = arcs.length - 1; i >= 0; i--) {
       const a = g.arcId[arcs[i]], e = a >> 1, P = edgePts(g, e), seg = [];
+      ed.push(e);
       for (let k = 0; k < P.length; k += 2) seg.push([P[k], P[k + 1]]);
       if (a & 1) seg.reverse();
       for (let k = 1; k < seg.length; k++) pts.push(seg[k]);
     }
     const tail = bestEnd === g.eu[B.e] ? edgePart(g, B.e, 0, B.along) : edgePart(g, B.e, LB, B.along);
+    if (B.e !== A.e) ed.push(B.e);
     for (let k = 1; k < tail.length; k++) pts.push(tail[k]);
   }
   // include the walk from the bike to the street, so the line starts and ends at the bike
@@ -886,15 +898,34 @@ function routeNow(g, lat0, lng0, lat1, lng1) {
     if (k) { const d = Math.hypot(all[k][0] - all[k - 1][0], all[k][1] - all[k - 1][1]); if (d < 0.3) continue; len += d; }
     c.push(toLL(all[k][0], all[k][1]));
   }
-  return { c, len: Math.round(len) };
+  return { c, len: Math.round(len), ed };
 }
 
 async function routes({ pairs }) {
   const g = await loadGraph();
   if (!g) return { ok: false, list: [] };
   const list = [];
-  for (let i = 0; i + 3 < pairs.length; i += 4) list.push(route(g, pairs[i], pairs[i + 1], pairs[i + 2], pairs[i + 3]));
+  for (let i = 0; i + 3 < pairs.length; i += 4) { const r = route(g, pairs[i], pairs[i + 1], pairs[i + 2], pairs[i + 3]); list.push(r && { c: r.c, len: r.len }); }
   return { ok: true, list };
+}
+
+// how many of the given trips (estimated routes) use each street section
+async function corridor({ pairs }) {
+  const g = await loadGraph();
+  if (!g) return { ok: false, list: [], max: 0 };
+  const use = new Map(); // edge -> indices of the trips using it
+  for (let i = 0; i + 3 < pairs.length; i += 4) {
+    const r = route(g, pairs[i], pairs[i + 1], pairs[i + 2], pairs[i + 3]);
+    if (r) for (const e of new Set(r.ed)) { let l = use.get(e); if (!l) use.set(e, l = []); l.push(i / 4); }
+  }
+  let max = 0;
+  const list = [];
+  for (const [e, ix] of [...use.entries()].sort((a, b) => a[1].length - b[1].length)) {
+    const P = edgePts(g, e), c = [];
+    for (let k = 0; k < P.length; k += 2) c.push(toLL(P[k], P[k + 1]));
+    list.push({ c, n: ix.length, ix }); if (ix.length > max) max = ix.length;
+  }
+  return { ok: true, list, max };
 }
 
 // ------------------------------------------------------------------ one bike / one station over time
@@ -965,7 +996,7 @@ async function stationMoves({ uid, t0, t1, P, dates }) {
 // ------------------------------------------------------------------ rpc
 const OPS = {
   async init({ base, graph }) { BASE = base; GRAPH_VER = graph || ''; return true; },
-  routes, bikeTrail, stationMoves,
+  routes, corridor, bikeTrail, stationMoves,
   // new data arrived: forget the changed days and every cached result built on them
   async invalidate({ dates }) {
     for (const d of dates) DAYS.delete(d);

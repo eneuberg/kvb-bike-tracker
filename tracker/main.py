@@ -30,32 +30,57 @@ log = logging.getLogger("tracker")
 class AnalysisState:
     """Keeps the last analysis result between polls (serve mode)."""
 
+    FULL_EVERY_S = 3600  # full re-export of all days at most this often
+
     def __init__(self):
         self.last_run = 0.0
+        self.last_full = -1e18
         self.since: dict[str, list] = {}
 
     def update(self, cfg: Config, force: bool = False) -> None:
+        """Write the timeline files for the web app.
+
+        Past days do not change any more, so most runs only re-export the
+        last two days (fast even with 1-minute polls); a full export of all
+        days (which also refreshes "untouched since") runs at most hourly."""
         if not force and time.monotonic() - self.last_run < cfg.analysis_interval_minutes * 60:
             return
+        tl = cfg.site_dir / "tl"
+        full = force or time.monotonic() - self.last_full >= self.FULL_EVERY_S or not (tl / "index.json").exists()
         t0 = time.monotonic()
         try:
-            res = analysis.export(cfg.history_dir, cfg.analysis_days, int(cfg.timeline_step_minutes * 60))
+            res = analysis.export(cfg.history_dir, cfg.analysis_days if full else 2, int(cfg.timeline_step_minutes * 60))
         except Exception:  # must never break data collection
             log.exception("history export failed")
             return
         self.last_run = time.monotonic()
         if not res:
             return
-        tl = cfg.site_dir / "tl"
-        for date, day in res["days"].items():
-            render.write_json(tl / f"{date}.json", day)
-        render.write_json(tl / "index.json", res["index"])
-        keep = {f"{d}.json" for d in res["days"]} | {"index.json"}
-        for old in tl.glob("*.json"):
-            if old.name not in keep:
-                old.unlink()
-        self.since = res["since"]
-        log.info("history export written in %.1fs", time.monotonic() - t0)
+        if full:
+            for date, day in res["days"].items():
+                render.write_json(tl / f"{date}.json", day)
+            render.write_json(tl / "index.json", res["index"])
+            keep = {f"{d}.json" for d in res["days"]} | {"index.json"}
+            for old in tl.glob("*.json"):
+                if old.name not in keep:
+                    old.unlink()
+            self.since = res["since"]
+            self.last_full = time.monotonic()
+        else:
+            # the first exported day may start mid-day; keep the full export's file for it
+            dates = sorted(res["days"])
+            write = dates[1:] if len(dates) > 1 else dates
+            for date in write:
+                render.write_json(tl / f"{date}.json", res["days"][date])
+            try:
+                index = json.loads((tl / "index.json").read_text())
+            except (OSError, ValueError):
+                index = res["index"]
+            fresh = {d["date"]: d for d in res["index"]["days"] if d["date"] in write}
+            days = [fresh.pop(d["date"], d) for d in index["days"]] + list(fresh.values())
+            index = {**res["index"], "days": sorted(days, key=lambda d: d["date"])}
+            render.write_json(tl / "index.json", index)
+        log.info("history export (%s) written in %.1fs", "full" if full else "last 2 days", time.monotonic() - t0)
 
     def attach_since(self, bikes: list[dict], now: int) -> None:
         """Add 'since' (untouched since, epoch) to every bike, patching moves

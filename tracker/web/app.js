@@ -1,6 +1,7 @@
 /* KVB-Rad Tracker.
-   Two views: "Karte" (live and history on one timeline, live at the right end)
-   and "Analyse" (free filters, computed in a web worker from the raw polls).
+   One view: a timeline (live at the right end) with layers for stations, free
+   bikes, trips in a time window and an availability overlay. Analyses run in
+   a web worker from the raw polls; routes are estimated there with A*.
    MapLibre GL renders on the GPU, so everything scales while zooming. */
 'use strict';
 (() => {
@@ -49,8 +50,9 @@
 
   // ================================================================ colours
   const C = {
-    station: css('--station'), free: css('--free'), ink: css('--ink'), surface: css('--surface'),
+    station: css('--station'), stText: css('--station-text'), free: css('--free'), ink: css('--ink'), surface: css('--surface'),
     wd: css('--wd'), we: css('--we'), muted: css('--muted'), trip: css('--trip'),
+    tStart: css('--t-start'), tEnd: css('--t-end'), dur: ['--d0', '--d1', '--d2', '--d3', '--d4'].map(css),
   };
   const R = DARK ? {
     seq: ['#123056', '#1c5cab', '#3987e5', '#6da7ec'],
@@ -59,6 +61,7 @@
     blue: ['#1b3557', '#1c5cab', '#3987e5', '#86b6ef'],
     div: { neg: ['#e66767', '#a83a3a', '#5a2e2e'], mid: '#3a3f4a', pos: ['#2a4f80', '#3987e5', '#86b6ef'] },
     idle: ['#2f2580', '#4f3fbf', '#7a6cf0', '#a99ff5', '#d5cffb'],
+    freq: ['#3d3470', '#5f4fc4', '#9484ee', '#e2dcff'],
   } : {
     seq: ['#cde2fb', '#86b6ef', '#3987e5', '#1c5cab'],
     heat: ['rgba(235,104,52,0)', '#fbd0b9', '#f59a6b', '#eb6834', '#b4380f'],
@@ -66,6 +69,7 @@
     blue: ['#cde2fb', '#86b6ef', '#2a78d6', '#184f95'],
     div: { neg: ['#e34948', '#ee8a89', '#f6c3c2'], mid: '#e6e3de', pos: ['#b7d3f6', '#6da7ec', '#2a78d6'] },
     idle: ['#d5cffb', '#a99ff5', '#7a6cf0', '#5240d0', '#2f2580'],
+    freq: ['#cbc3f3', '#9583e6', '#5b41cf', '#26176e'],
   };
   const gradient = (cols) => `linear-gradient(90deg, ${cols.join(', ')})`;
   // stepped scale for Erreichbarkeit: near = indigo ... far = red. Checked for
@@ -92,13 +96,21 @@
   const PIXEL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 
   // ================================================================ state
+  const UI_KEY = 'kvb-ui-v1';
+  const DEFAULT_O = { win: 60, color: 'dir', away: true, metric: 'prob', R: 200, res: 25, days: 14, wd: 'all',
+    minGone: 100, jump: 300, maxDurH: 4 };
+  function loadO() {
+    try { const o = JSON.parse(localStorage.getItem(UI_KEY) || 'null'); if (o && typeof o === 'object') return { ...DEFAULT_O, ...o }; } catch { /* ignore */ }
+    return { ...DEFAULT_O };
+  }
+  const saveO = () => { try { localStorage.setItem(UI_KEY, JSON.stringify(S.o)); } catch { /* ignore */ } };
   const S = {
-    mode: 'karte', tab: 'erreichbarkeit', cfg: null, f: null,
-    live: null, tl: null, trips: null, me: null, sel: null, hist: null, hp: { h: 24, from: null, to: null },
+    mode: 'karte', cfg: null, o: loadO(),
+    live: null, tl: null, trips: null, away: [], me: null, sel: null, hist: null, hp: { h: 24, from: null, to: null },
     k: { span: 24, end: null, isLive: true, frame: -1, clock: 0, playing: false, speed: 1, liveInuse: null },
-    layers: { stations: true, free: true, trips: true, heat: false },
-    wPlaying: false, stList: null,
+    layers: { stations: true, free: true, trips: true, avail: false },
   };
+  const tripParams = () => ({ minGone: S.o.minGone, jump: S.o.jump, maxDur: S.o.maxDurH * 3600 });
 
   // ================================================================ map
   let map, styleReady = false, hasGlyphs = false;
@@ -161,78 +173,31 @@
   }
 
   const zoomRadius = (z10, z14, z18) => ['interpolate', ['exponential', 1.6], ['zoom'], 10, z10, 14, z14, 18, z18];
-  function heatPaint(weight) {
-    return {
-      'heatmap-weight': weight,
-      'heatmap-intensity': ['interpolate', ['linear'], ['zoom'], 10, 0.5, 13, 1.1, 16, 2.2],
-      'heatmap-radius': ['interpolate', ['exponential', 1.7], ['zoom'], 10, 9, 13, 20, 16, 52, 18, 120],
-      'heatmap-color': ['interpolate', ['linear'], ['heatmap-density'], 0, R.heat[0], 0.15, R.heat[1], 0.4, R.heat[2], 0.7, R.heat[3], 1, R.heat[4]],
-      'heatmap-opacity': ['interpolate', ['linear'], ['zoom'], 14, 0.85, 18, 0.55],
-    };
-  }
+  const lineW = (a, b) => ['interpolate', ['linear'], ['zoom'], 10, a, 16, b];
+  const dirGradient = ['interpolate', ['linear'], ['line-progress'], 0, C.tStart, 1, C.tEnd];
 
   function setupLayers() {
     const before = map.getStyle().layers.find((l) => l.type === 'symbol')?.id;
-    for (const id of ['bikes', 'stations', 'netc', 'idle', 'sel', 'me', 'trail', 'anst', 'qpt', 'tripdots', 'particles'])
+    for (const id of ['bikes', 'stations', 'sel', 'me', 'qpt', 'tripsSeg', 'tripdots', 'corr'])
       map.addSource(id, { type: 'geojson', data: EMPTY });
-    map.addSource('flows', { type: 'geojson', data: EMPTY, lineMetrics: true });
     map.addSource('trips', { type: 'geojson', data: EMPTY, lineMetrics: true });
-    map.addSource('hist', { type: 'geojson', data: EMPTY });
-    // small arrow for the direction of estimated routes (SDF, so it takes any colour)
-    { const n = 24, cv = document.createElement('canvas'); cv.width = cv.height = n; const x = cv.getContext('2d');
-      x.fillStyle = '#fff'; x.beginPath(); x.moveTo(5, 4); x.lineTo(20, 12); x.lineTo(5, 20); x.lineTo(9, 12); x.closePath(); x.fill();
-      map.addImage('arrow', x.getImageData(0, 0, n, n), { sdf: true }); }
+    map.addSource('hist', { type: 'geojson', data: EMPTY, lineMetrics: true });
     map.addSource('raster', { type: 'image', url: PIXEL, coordinates: [[6.76, 51.09], [7.18, 51.09], [7.18, 50.83], [6.76, 50.83]] });
 
     // under the basemap labels
     map.addLayer({ id: 'raster-l', type: 'raster', source: 'raster', layout: { visibility: 'none' },
       paint: { 'raster-resampling': 'linear', 'raster-opacity': 0.9, 'raster-fade-duration': 0 } }, before);
-    map.addLayer({ id: 'live-heat', type: 'heatmap', source: 'bikes', layout: { visibility: 'none' }, paint: heatPaint(1) }, before);
     map.addLayer({ id: 'qpt-fill', type: 'fill', source: 'qpt', filter: ['==', ['geometry-type'], 'Polygon'], layout: { visibility: 'none' },
       paint: { 'fill-color': hexA(C.ink, 0.06) } }, before);
 
-    // on top
-    map.addLayer({ id: 'netc', type: 'circle', source: 'netc', layout: { visibility: 'none' },
-      paint: { 'circle-radius': ['interpolate', ['exponential', 1.6], ['zoom'], 10, ['*', ['get', 'rel'], 9], 14, ['*', ['get', 'rel'], 26], 17, ['*', ['get', 'rel'], 60]],
-        'circle-color': ['interpolate', ['linear'], ['get', 'v'], -1, R.div.neg[0], -0.5, R.div.neg[1], -0.15, R.div.neg[2], 0, R.div.mid, 0.15, R.div.pos[0], 0.5, R.div.pos[1], 1, R.div.pos[2]],
-        'circle-opacity': 0.7, 'circle-stroke-color': C.surface, 'circle-stroke-width': 0.8 } });
-    map.addLayer({ id: 'flows-line', type: 'line', source: 'flows', layout: { visibility: 'none', 'line-cap': 'round' },
-      paint: { 'line-width': ['interpolate', ['linear'], ['zoom'], 10, ['+', 0.6, ['*', ['get', 'w'], 3]], 15, ['+', 1, ['*', ['get', 'w'], 8]]],
-        'line-gradient': ['interpolate', ['linear'], ['line-progress'], 0, hexA(C.trip, 0.06), 1, hexA(C.trip, 0.75)] } });
-    map.addLayer({ id: 'particles', type: 'circle', source: 'particles', layout: { visibility: 'none' },
-      paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, 1.8, 15, 3.6], 'circle-color': C.trip,
-        'circle-stroke-color': C.surface, 'circle-stroke-width': 0.8, 'circle-opacity': ['get', 'o'], 'circle-stroke-opacity': ['get', 'o'] } });
-    // history of one bike or one station: estimated routes (dashed, with arrows), small
-    // moves, snapshots (every poll the bike was seen) and stays (where it was parked)
-    const hk = (k) => ['==', ['get', 'kind'], k];
-    map.addLayer({ id: 'hist-shift', type: 'line', source: 'hist', filter: hk('shift'), layout: { visibility: 'none', 'line-cap': 'round' },
-      paint: { 'line-color': C.muted, 'line-width': 1.4, 'line-dasharray': [1, 1.5] } });
-    map.addLayer({ id: 'hist-route', type: 'line', source: 'hist', filter: ['any', hk('route'), hk('air')],
-      layout: { visibility: 'none', 'line-cap': 'butt', 'line-join': 'round' },
-      paint: { 'line-color': C.trip, 'line-width': ['interpolate', ['linear'], ['zoom'], 11, 2, 16, 4.2],
-        'line-opacity': ['case', ['==', ['get', 'hi'], 1], 1, ['==', ['get', 'dim'], 1], 0.28, 0.82],
-        'line-dasharray': ['literal', [2, 1.4]] } });
-    map.addLayer({ id: 'hist-arrow', type: 'symbol', source: 'hist', filter: ['any', hk('route'), hk('air')],
-      layout: { visibility: 'none', 'symbol-placement': 'line', 'symbol-spacing': 90, 'icon-image': 'arrow',
-        'icon-size': ['interpolate', ['linear'], ['zoom'], 11, 0.45, 16, 0.75], 'icon-allow-overlap': true, 'icon-rotation-alignment': 'map' },
-      paint: { 'icon-color': C.trip, 'icon-opacity': ['case', ['==', ['get', 'dim'], 1], 0.3, 1] } });
-    map.addLayer({ id: 'hist-snap', type: 'circle', source: 'hist', filter: hk('snap'), layout: { visibility: 'none' },
-      paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 1.4, 17, 3], 'circle-color': C.ink, 'circle-opacity': 0.45 } });
-    map.addLayer({ id: 'hist-stay', type: 'circle', source: 'hist', filter: hk('stay'), layout: { visibility: 'none' },
-      paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 11, ['+', 3, ['get', 'r']], 16, ['+', 6, ['*', 1.6, ['get', 'r']]]],
-        'circle-color': ['case', ['==', ['get', 'st'], 1], C.station, C.free],
-        'circle-stroke-color': ['case', ['==', ['get', 'hi'], 1], C.ink, C.surface], 'circle-stroke-width': ['case', ['==', ['get', 'hi'], 1], 3, 1.6],
-        'circle-opacity': ['case', ['==', ['get', 'dim'], 1], 0.35, 1] } });
-    map.addLayer({ id: 'idle-dots', type: 'circle', source: 'idle', layout: { visibility: 'none' },
-      paint: { 'circle-radius': zoomRadius(2.4, 5, 10),
-        'circle-color': ['interpolate', ['linear'], ['get', 'l'], 0, R.idle[0], 0.25, R.idle[1], 0.5, R.idle[2], 0.75, R.idle[3], 1, R.idle[4]],
-        'circle-stroke-color': C.surface, 'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 11, 0.3, 15, 1.2] } });
+    // parked bikes: neutral, so colour stays free for movement
     map.addLayer({ id: 'free-dots', type: 'circle', source: 'bikes', filter: ['==', ['get', 'k'], 0],
-      paint: { 'circle-radius': zoomRadius(1.8, 4.2, 9), 'circle-color': C.free,
-        'circle-stroke-color': C.surface, 'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 11, 0.3, 15, 1.4] } });
+      paint: { 'circle-radius': zoomRadius(1.6, 3.8, 8.5), 'circle-color': C.free,
+        'circle-stroke-color': C.surface, 'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 11, 0.3, 15, 1.2] } });
     const stR = (base, k) => ['+', base, ['*', k, ['sqrt', ['get', 'n']]]];
     map.addLayer({ id: 'stations-c', type: 'circle', source: 'stations',
-      paint: { 'circle-radius': ['interpolate', ['exponential', 1.6], ['zoom'], 10, stR(2.6, 0.6), 14, stR(7, 2), 18, stR(14, 3.4)],
+      // area grows with the number of bikes: 10 bikes ~ 60 % larger radius than 1
+      paint: { 'circle-radius': ['interpolate', ['exponential', 1.6], ['zoom'], 10, stR(2.2, 0.75), 14, stR(6, 2.4), 18, stR(11, 4)],
         'circle-color': ['case', ['==', ['get', 'n'], 0], C.surface, C.station],
         'circle-stroke-color': ['case', ['==', ['get', 'n'], 0], C.station, C.surface],
         'circle-stroke-width': ['interpolate', ['linear'], ['zoom'], 10, 0.8, 15, 2] } });
@@ -240,37 +205,59 @@
       map.addLayer({ id: 'stations-t', type: 'symbol', source: 'stations', minzoom: 12.6,
         layout: { 'text-field': ['to-string', ['get', 'n']], 'text-font': ['Noto Sans Bold'],
           'text-size': ['interpolate', ['linear'], ['zoom'], 12.6, 9.5, 16, 13], 'text-allow-overlap': true, 'text-ignore-placement': true },
-        paint: { 'text-color': ['case', ['==', ['get', 'n'], 0], C.station, '#ffffff'] } });
+        paint: { 'text-color': ['case', ['==', ['get', 'n'], 0], C.station, C.stText] } });
     }
-    map.addLayer({ id: 'trips-line', type: 'line', source: 'trips', layout: { visibility: 'none', 'line-cap': 'butt', 'line-join': 'round' },
-      paint: { 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 1.2, 15, 3], 'line-color': C.trip,
-        'line-dasharray': ['literal', [2, 1.4]], 'line-opacity': ['get', 'o'] } });
-    map.addLayer({ id: 'trips-dot', type: 'circle', source: 'tripdots', layout: { visibility: 'none' },
-      paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, ['case', ['==', ['get', 'away'], 1], 3.5, 3], 15, ['case', ['==', ['get', 'away'], 1], 7, 6]],
-        'circle-color': ['case', ['==', ['get', 'away'], 1], 'rgba(0,0,0,0)', C.trip],
-        'circle-stroke-color': ['case', ['==', ['get', 'away'], 1], C.trip, C.surface],
-        'circle-stroke-width': ['case', ['==', ['get', 'away'], 1], 2.2, 1.5] } });
-    map.addLayer({ id: 'an-st', type: 'circle', source: 'anst', layout: { visibility: 'none' },
-      paint: { 'circle-radius': ['interpolate', ['exponential', 1.6], ['zoom'], 10, ['+', 2.5, ['*', 0.9, ['sqrt', ['get', 'a']]]],
-          14, ['+', 6, ['*', 2.6, ['sqrt', ['get', 'a']]]], 18, ['+', 12, ['*', 4.2, ['sqrt', ['get', 'a']]]]],
-        'circle-color': R.blue[2], 'circle-stroke-color': C.surface, 'circle-stroke-width': 1.2 } });
+
+    // trips: solid lines, red start -> blue destination, or coloured by minutes on the road
+    map.addLayer({ id: 'trips-grad', type: 'line', source: 'trips', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-width': lineW(1.6, 3.6), 'line-gradient': dirGradient, 'line-opacity': 0.62 } });
+    map.addLayer({ id: 'trips-seg', type: 'line', source: 'tripsSeg', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-width': lineW(1.6, 3.6), 'line-color': ['to-color', ['get', 'col']], 'line-opacity': 0.7 } });
+    // how many trips use each street section: wider and darker = more
+    map.addLayer({ id: 'trips-corr', type: 'line', source: 'corr', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-width': ['interpolate', ['linear'], ['zoom'], 10, ['+', 0.8, ['*', 3, ['get', 'v']]], 16, ['+', 2, ['*', 10, ['get', 'v']]]],
+        'line-color': ['interpolate', ['linear'], ['get', 'v'], 0, R.freq[0], 0.25, R.freq[1], 0.6, R.freq[2], 1, R.freq[3]], 'line-opacity': 0.92 } });
+    map.addLayer({ id: 'trips-pt', type: 'circle', source: 'tripdots', layout: { visibility: 'none' },
+      paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, ['*', ['get', 'r'], 0.55], 16, ['get', 'r']],
+        'circle-color': ['to-color', ['get', 'fill']], 'circle-stroke-color': ['to-color', ['get', 'stroke']], 'circle-stroke-width': ['get', 'sw'] } });
+
+    // one bike's or one station's history
+    const hk = (k) => ['==', ['get', 'kind'], k];
+    const hop = (on, off, base) => ['case', ['==', ['get', 'hi'], 1], on, ['==', ['get', 'dim'], 1], off, base];
+    map.addLayer({ id: 'hist-shift', type: 'line', source: 'hist', filter: hk('shift'), layout: { visibility: 'none', 'line-cap': 'round' },
+      paint: { 'line-color': C.muted, 'line-width': 1.4, 'line-dasharray': [1, 1.5] } });
+    map.addLayer({ id: 'hist-route', type: 'line', source: 'hist', filter: ['any', hk('route'), hk('air')],
+      layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-gradient': dirGradient, 'line-width': ['interpolate', ['linear'], ['zoom'], 10, hop(3.4, 1.6, 2.2), 16, hop(6.5, 3, 4.4)], 'line-opacity': hop(1, 0.3, 0.9) } });
+    map.addLayer({ id: 'hist-snap', type: 'circle', source: 'hist', filter: hk('snap'), layout: { visibility: 'none' },
+      paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 12, 1.4, 17, 3], 'circle-color': C.ink, 'circle-opacity': 0.45 } });
+    map.addLayer({ id: 'hist-stay', type: 'circle', source: 'hist', filter: hk('stay'), layout: { visibility: 'none' },
+      paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 11, ['+', 3, ['get', 'r']], 16, ['+', 6, ['*', 1.6, ['get', 'r']]]],
+        'circle-color': ['case', ['==', ['get', 'st'], 1], C.station, C.free],
+        'circle-stroke-color': ['case', ['==', ['get', 'hi'], 1], C.ink, C.surface], 'circle-stroke-width': ['case', ['==', ['get', 'hi'], 1], 3, 1.6],
+        'circle-opacity': ['case', ['==', ['get', 'dim'], 1], 0.35, 1] } });
+    map.addLayer({ id: 'hist-stop', type: 'circle', source: 'hist', filter: ['any', hk('ts'), hk('te')], layout: { visibility: 'none' },
+      paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 11, 3, 16, 6], 'circle-color': ['case', hk('ts'), C.tStart, C.tEnd],
+        'circle-stroke-color': C.surface, 'circle-stroke-width': 1.6, 'circle-opacity': hop(1, 0.3, 1), 'circle-stroke-opacity': hop(1, 0.3, 1) } });
+
     map.addLayer({ id: 'qpt-line', type: 'line', source: 'qpt', filter: ['==', ['geometry-type'], 'Polygon'], layout: { visibility: 'none' },
       paint: { 'line-color': C.ink, 'line-width': 1.6, 'line-dasharray': [2, 2] } });
     map.addLayer({ id: 'qpt-dot', type: 'circle', source: 'qpt', filter: ['==', ['geometry-type'], 'Point'], layout: { visibility: 'none' },
       paint: { 'circle-radius': 6, 'circle-color': C.ink, 'circle-stroke-color': C.surface, 'circle-stroke-width': 2.5 } });
     map.addLayer({ id: 'sel-ring', type: 'circle', source: 'sel',
       paint: { 'circle-radius': zoomRadius(9, 15, 24), 'circle-color': 'rgba(0,0,0,0)', 'circle-stroke-color': C.ink, 'circle-stroke-width': 2.5 } });
-    map.addLayer({ id: 'me-acc', type: 'circle', source: 'me', paint: { 'circle-radius': zoomRadius(10, 18, 30), 'circle-color': hexA(C.station, 0.15) } });
-    map.addLayer({ id: 'me-dot', type: 'circle', source: 'me', paint: { 'circle-radius': 6.5, 'circle-color': C.station, 'circle-stroke-color': '#fff', 'circle-stroke-width': 2.5 } });
+    map.addLayer({ id: 'me-acc', type: 'circle', source: 'me', paint: { 'circle-radius': zoomRadius(10, 18, 30), 'circle-color': hexA(C.tEnd, 0.15) } });
+    map.addLayer({ id: 'me-dot', type: 'circle', source: 'me', paint: { 'circle-radius': 6.5, 'circle-color': C.tEnd, 'circle-stroke-color': '#fff', 'circle-stroke-width': 2.5 } });
 
     map.on('click', onMapClick);
+    map.on('moveend', () => { if (S.layers.avail && S.o.res < 25) scheduleOverlay(400); });
     if (matchMedia('(hover: hover)').matches) {
       let raf = 0;
       map.on('mousemove', (e) => {
         if (raf) return;
         raf = requestAnimationFrame(() => {
           raf = 0;
-          map.getCanvas().style.cursor = anyPointTab() ? 'crosshair' : pick(e.point) ? 'pointer' : '';
+          map.getCanvas().style.cursor = pick(e.point) ? 'pointer' : S.layers.avail ? 'crosshair' : '';
         });
       });
     }
@@ -279,32 +266,28 @@
   const setData = (id, data) => map?.getSource(id)?.setData(data);
   const vis = (id, on) => map.getLayer(id) && map.setLayoutProperty(id, 'visibility', on ? 'visible' : 'none');
   const isVis = (id) => map.getLayer(id) && map.getLayoutProperty(id, 'visibility') !== 'none';
-  const anyPointTab = () => S.mode === 'analyse' && (S.tab === 'erreichbarkeit' || S.tab === 'dichte');
 
   function applyVisibility() {
     if (!styleReady) return;
-    const k = S.mode === 'karte', a = !k, t = S.tab, L = S.layers;
-    vis('stations-c', k && L.stations); vis('stations-t', k && L.stations);
-    vis('free-dots', k && L.free); vis('live-heat', k && L.heat);
+    const L = S.layers, h = !!S.hist;
+    vis('stations-c', L.stations); vis('stations-t', L.stations);
+    vis('free-dots', L.free);
     // while one bike's or station's history is open, everything else steps back
-    const h = k && !!S.hist;
-    vis('trips-line', k && L.trips && !h); vis('trips-dot', k && L.trips && !h);
-    if (map.getLayer('free-dots')) {
-      map.setPaintProperty('free-dots', 'circle-opacity', h ? 0.22 : 1); map.setPaintProperty('free-dots', 'circle-stroke-opacity', h ? 0.22 : 1);
-      map.setPaintProperty('stations-c', 'circle-opacity', h ? 0.3 : 1); map.setPaintProperty('stations-c', 'circle-stroke-opacity', h ? 0.3 : 1);
-      if (map.getLayer('stations-t')) map.setPaintProperty('stations-t', 'text-opacity', h ? 0.3 : 1);
-    }
-    for (const id of ['hist-shift', 'hist-route', 'hist-arrow', 'hist-snap', 'hist-stay']) vis(id, k && !!S.hist);
-    vis('raster-l', a && (t === 'erreichbarkeit' || t === 'dichte'));
-    const q = anyPointTab() && S.sel?.type === 'point';
+    vis('trips-grad', L.trips && !h && S.o.color === 'dir');
+    vis('trips-seg', L.trips && !h && S.o.color === 'dur');
+    vis('trips-corr', L.trips && !h && S.o.color === 'freq');
+    vis('trips-pt', L.trips && !h);
+    map.setPaintProperty('free-dots', 'circle-opacity', h ? 0.25 : 1); map.setPaintProperty('free-dots', 'circle-stroke-opacity', h ? 0.25 : 1);
+    map.setPaintProperty('stations-c', 'circle-opacity', h ? 0.3 : 1); map.setPaintProperty('stations-c', 'circle-stroke-opacity', h ? 0.3 : 1);
+    if (map.getLayer('stations-t')) map.setPaintProperty('stations-t', 'text-opacity', h ? 0.3 : 1);
+    for (const id of ['hist-shift', 'hist-route', 'hist-snap', 'hist-stay', 'hist-stop']) vis(id, h);
+    vis('raster-l', L.avail);
+    const q = L.avail && S.sel?.type === 'point';
     vis('qpt-fill', q); vis('qpt-line', q); vis('qpt-dot', q);
-    vis('netc', a && t === 'stroeme'); vis('flows-line', a && t === 'stroeme'); vis('particles', a && t === 'stroeme');
-    vis('an-st', a && t === 'stationen');
-    vis('idle-dots', a && t === 'standzeit');
   }
 
   // ================================================================ picking
-  const PRIORITY = ['hist-stay', 'stations-c', 'an-st', 'free-dots', 'idle-dots', 'trips-dot', 'hist-route', 'netc'];
+  const PRIORITY = ['hist-stop', 'hist-stay', 'hist-route', 'trips-pt', 'stations-c', 'free-dots', 'trips-grad', 'trips-seg', 'trips-corr'];
   function pick(pt) {
     const layers = PRIORITY.filter(isVis);
     if (!layers.length) return null;
@@ -318,18 +301,23 @@
   }
 
   function onMapClick(e) {
-    if (anyPointTab()) { pointQuery(e.lngLat.lng, e.lngLat.lat); return; }
     const f = pick(e.point);
-    if (!f) { closeDetail(); return; }
+    if (!f) {
+      if (S.layers.avail) pointQuery(e.lngLat.lng, e.lngLat.lat);
+      else closeDetail();
+      return;
+    }
     const p = f.properties;
     switch (f.layer.id) {
       case 'stations-c': S.k.isLive ? showStation(p.uid) : showTlStation(p.i); break;
       case 'free-dots': S.k.isLive ? showBike(p.id) : showTlBike(p.i); break;
-      case 'idle-dots': showBike(p.id); break;
-      case 'trips-dot': showTrip({ ...p, lng: f.geometry.coordinates[0], lat: f.geometry.coordinates[1] }); break;
-      case 'hist-stay': case 'hist-route': histFocus(+p.n); break;
-      case 'netc': showNetCell(p, f.geometry.coordinates); break;
-      case 'an-st': stationQuery(p.uid); break;
+      case 'trips-pt': case 'trips-grad': case 'trips-seg': case 'trips-corr': {
+        if (+p.away) { openTrip(p); break; }
+        const ks = tripsNear(e.point);
+        if (ks.length > 1) showTripPicker(ks); else if (ks.length) openTrip({ k: ks[0] });
+        break;
+      }
+      case 'hist-stay': case 'hist-route': case 'hist-stop': histFocus(+p.n); break;
       default:
     }
   }
@@ -405,32 +393,6 @@
   }
   const refreshSheet = () => requestAnimationFrame(() => setSheet(sheetState));
 
-  // ================================================================ modes
-  function setMode(mode, opts = {}) {
-    if (S.mode === 'karte' && mode !== 'karte') stopPlay();
-    if (S.mode === 'analyse' && mode !== 'analyse') { stopWindowPlay(); stopParticles(); }
-    S.mode = mode;
-    for (const b of $$('.modes button')) b.setAttribute('aria-selected', String(b.dataset.mode === mode));
-    for (const s of $$('section.mode')) s.hidden = s.dataset.mode !== mode;
-    closeDetail(true);
-    updateHash();
-    applyVisibility();
-    if (mode === 'karte') { renderKarte(true); if (opts.trail) showTrailFor(opts.trail); }
-    if (mode === 'analyse') enterAnalysis();
-    updateStatus();
-    requestAnimationFrame(() => setSheet(opts.sheet || (sheetState === 'full' ? 'half' : sheetState)));
-  }
-  function updateHash() {
-    const h = S.mode === 'analyse' ? `#analyse/${S.tab}` : '#karte';
-    if (location.hash !== h) history.replaceState(null, '', h);
-  }
-  function readHash() {
-    const [m, t] = location.hash.replace('#', '').split('/');
-    S.mode = m === 'analyse' ? 'analyse' : 'karte';
-    const tab = ({ verfuegbarkeit: 'erreichbarkeit' })[t] || t;
-    if (tab && $(`#aTabs [data-tab="${tab}"]`)) S.tab = tab;
-  }
-
   function updateStatus() {
     const el = $('#status'), txt = $('#statusText');
     el.classList.remove('stale', 'past');
@@ -463,8 +425,7 @@
       if (!L.docked.has(k)) L.docked.set(k, []);
       L.docked.get(k).push(b);
     }
-    if (S.mode === 'karte' && S.k.isLive) renderKarte(true);
-    if (S.mode === 'analyse' && S.tab === 'standzeit') renderIdle();
+    if (S.k.isLive) renderKarte(true);
     updateStatus(); renderFresh();
   }
 
@@ -551,8 +512,9 @@
     if (!changed.length) return false;
     if (worker) await rpc('invalidate', { dates: changed });
     if (S.tl) S.tl.loaded = 0; // next timeline request reloads
-    if (S.mode === 'karte' && (S.k.isLive || !S.tl)) await reloadTimeline();
-    else if (S.mode === 'analyse') { if (S.tab === 'standzeit') renderIdle(); else scheduleCompute(0); }
+    if (S.k.isLive || !S.tl) await reloadTimeline();
+    if (S.layers.avail) computeOverlay(true);
+    if ($('#statsBox')?.open) renderStats();
     return true;
   }
   async function checkUpdate(manual) {
@@ -713,6 +675,7 @@
       setClock(k.clock, false);
     }
     renderTrips(k.clock);
+    if (S.layers.avail) scheduleOverlay(500);
   }
 
   function renderLiveBikes() {
@@ -760,11 +723,11 @@
     $('#tlRange').setAttribute('aria-valuetext', live ? 'Live' : fmtWhen(t));
   }
 
-  // ---- trips active at the shown moment
-  // Past moment: every trip that started before and ended after it, drawn along
-  // its estimated route (dashed) with a dot at the estimated position.
-  // Live: the end of a running trip is unknown yet, so only where each bike
-  // left from (ring) is shown.
+  // ---- trips in the window [clock - win, clock]
+  // Arrived in the window: the whole estimated route. Running at the clock
+  // (past only, the destination is known): the route up to the estimated
+  // position. Live: destinations are unknown, so a ring where the bike left,
+  // coloured by minutes on the road so far.
   const lenAlong = (c) => { const L = [0]; for (let k = 1; k < c.length; k++) L.push(L[k - 1] + hav(c[k - 1][1], c[k - 1][0], c[k][1], c[k][0])); return L; };
   function along(c, L, u) {
     const want = u * L[L.length - 1];
@@ -775,6 +738,27 @@
   function partial(c, L, u) {
     const want = u * L[L.length - 1], out = [c[0]];
     for (let k = 1; k < c.length; k++) { if (L[k] >= want) { out.push(along(c, L, u)); break; } out.push(c[k]); }
+    return out;
+  }
+  // duration classes (minutes on the road) for the "Dauer" colouring and live rings
+  const DUR_EDGES = [5, 10, 20, 40];
+  const DUR_LABELS = ['< 5', '5–10', '10–20', '20–40', '> 40 Min.'];
+  const durClass = (min) => { let k = 0; while (k < DUR_EDGES.length && min >= DUR_EDGES[k]) k++; return k; };
+  // split a route into pieces of one duration class each, assuming even speed
+  function slice(c, L, d0, d1) {
+    const T = L[L.length - 1], out = [along(c, L, d0 / T)];
+    for (let k = 1; k < c.length - 1; k++) if (L[k] > d0 && L[k] < d1) out.push(c[k]);
+    out.push(along(c, L, d1 / T));
+    return out;
+  }
+  function durPieces(c, L, dur, uEnd = 1) {
+    const total = L[L.length - 1];
+    if (!(total > 0)) return [];
+    const end = uEnd * total, cuts = [0];
+    for (const m of DUR_EDGES) { const d = ((m * 60) / dur) * total; if (d < end) cuts.push(d); }
+    cuts.push(end);
+    const out = [];
+    for (let j = 0; j + 1 < cuts.length; j++) if (cuts[j + 1] > cuts[j]) out.push({ c: slice(c, L, cuts[j], cuts[j + 1]), k: j });
     return out;
   }
   let routeBusy = false;
@@ -794,54 +778,126 @@
     finally { routeBusy = false; }
     renderTrips(S.k.clock);
   }
+  const pt = (c, props) => ({ type: 'Feature', geometry: { type: 'Point', coordinates: c }, properties: props });
+  const ln = (c, props) => ({ type: 'Feature', geometry: { type: 'LineString', coordinates: c }, properties: props });
+  let tripSum = { arrived: 0, running: 0, away: 0, today: 0 };
+
   function renderTrips(clock) {
     if (!styleReady) return;
-    if (!S.trips || !S.layers.trips || S.mode !== 'karte') { setData('trips', EMPTY); setData('tripdots', EMPTY); return; }
-    const lines = [], dots = [], need = [];
-    if (S.k.isLive) {
-      for (const a of S.away || []) dots.push({ type: 'Feature', geometry: { type: 'Point', coordinates: a.a }, properties: { away: 1, bike: a.bike, since: a.since, from: a.from || '' } });
-    } else {
-      for (const tr of S.trips) {
-        if (tr.s >= clock) break;
-        if (tr.e <= clock) continue; // at a poll the bike is visible again, so only strictly between
-        const u = Math.min(1, Math.max(0, (clock - tr.s) / Math.max(60, tr.e - tr.s)));
-        if (tr.route === undefined) need.push(tr);
-        const R = tr.route;
-        const c = R ? R.c : [tr.a, tr.b], L = R ? R.L : lenAlong(c);
-        lines.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: c }, properties: { o: 0.35 } });
-        if (u > 0) lines.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: partial(c, L, u) }, properties: { o: 1 } });
-        dots.push({ type: 'Feature', geometry: { type: 'Point', coordinates: along(c, L, u) }, properties: { away: 0, k: tr.k } });
+    if (!S.trips || !S.layers.trips) {
+      setData('trips', EMPTY); setData('tripsSeg', EMPTY); setData('tripdots', EMPTY);
+      tripSum = { arrived: 0, running: 0, away: 0, today: 0 }; renderCtx(); return;
+    }
+    const A = clock - S.o.win * 60, dir = S.o.color !== 'dur', freq = S.o.color === 'freq';
+    const freqPairs = [];
+    const lines = [], segs = [], dots = [], need = [];
+    const sum = { arrived: 0, running: 0, away: 0, today: 0 };
+    const today = isoLocal(clock);
+    for (const tr of S.trips) {
+      if (tr.s >= clock) break;
+      if (tr.e <= clock && isoLocal(tr.e) === today) sum.today++;
+      const arrived = tr.e > A && tr.e <= clock;
+      const running = !arrived && tr.e > clock && !S.k.isLive;
+      if (!arrived && !running) continue;
+      if (tr.route === undefined) { need.push(tr); }
+      const R = tr.route;
+      const c = R ? R.c : [tr.a, tr.b], L = R ? R.L : lenAlong(c);
+      const dur = Math.max(60, tr.e - tr.s);
+      const u = arrived ? 1 : Math.min(1, Math.max(0.02, (clock - tr.s) / dur));
+      const geom = u < 1 ? partial(c, L, u) : c;
+      const props = { k: tr.k };
+      if (freq) { if (arrived) freqPairs.push(tr); }
+      else if (dir) lines.push(ln(geom, props));
+      else for (const p of durPieces(c, L, dur, u)) segs.push(ln(p.c, { k: tr.k, col: C.dur[p.k] }));
+      // stoppers: start (and destination, when arrived); a running trip gets a moving head
+      dots.push(pt(c[0], { k: tr.k, r: 3.6, sw: 1.2, fill: dir ? C.tStart : C.surface, stroke: dir ? C.surface : C.ink }));
+      if (arrived) { sum.arrived++; dots.push(pt(c[c.length - 1], { k: tr.k, r: 4, sw: 1.2, fill: dir ? C.tEnd : C.ink, stroke: C.surface })); }
+      else {
+        sum.running++;
+        const col = dir ? C.tEnd : C.dur[durClass((clock - tr.s) / 60)];
+        dots.push(pt(along(c, L, u), { k: tr.k, r: 4.6, sw: 2, fill: C.surface, stroke: col }));
+      }
+    }
+    if (S.k.isLive && S.o.away) {
+      for (const a of S.away) {
+        sum.away++;
+        const col = C.dur[durClass((clock - a.since) / 60)];
+        dots.push(pt(a.a, { away: 1, bike: a.bike, since: a.since, from: a.from || '', r: 5.5, sw: 2.2, fill: 'rgba(0,0,0,0)', stroke: col }));
       }
     }
     setData('trips', { type: 'FeatureCollection', features: lines });
+    setData('tripsSeg', { type: 'FeatureCollection', features: segs });
+    if (freq) updateCorridor(freqPairs); else if (corrKey) { corrKey = ''; setData('corr', EMPTY); }
     setData('tripdots', { type: 'FeatureCollection', features: dots });
-    if (need.length) fetchRoutes(need.slice(0, 400));
-    const n = S.k.isLive ? (S.away || []).length : dots.length;
-    $('#tripsNote') && ($('#tripsNote').textContent = S.k.isLive
-      ? `${nf.format(n)} Räder sind gerade unterwegs (Ring = wo sie losgefahren sind; das Ziel ist erst bekannt, wenn sie wieder auftauchen).`
-      : `${nf.format(n)} Fahrten liefen um ${fTime.format(new Date(clock * 1000))} Uhr. Gestrichelt = geschätzter Weg.`);
+    tripSum = sum;
+    renderCtx();
+    if (need.length) fetchRoutes(need.slice(0, 600));
   }
 
-  function showTrip(p) {
-    if (+p.away) {
-      showDetail('#detail', `
-        <p class="kicker"><span class="dot" style="background:${C.trip}"></span>Gerade unterwegs</p>
-        <h3>Rad ${esc(p.bike)}</h3>
-        <dl class="kv"><dt>Losgefahren</dt><dd>${p.from ? esc(p.from) : 'frei abgestellt'}, etwa ${fTime.format(new Date(p.since * 1000))} Uhr</dd>
-          <dt>Ziel</dt><dd>noch unbekannt</dd></dl>
-        <div class="actions"><button class="btn sm" data-act="trail" data-id="${esc(p.bike)}">Verlauf anzeigen</button></div>`);
-      select({ type: 'Point', coordinates: [p.lng ?? 0, p.lat ?? 0] });
-      return;
+  // street sections by number of trips (arrived in the window), computed in the worker
+  let corrKey = '', corrBusy = false, corrNext = null, corrMax = 0;
+  async function updateCorridor(list) {
+    const key = list.map((t) => t.k).join(',');
+    if (key === corrKey) return;
+    if (corrBusy) { corrNext = list; return; }
+    corrKey = key; corrBusy = true;
+    try {
+      const pairs = [];
+      for (const t of list) pairs.push(t.a[1], t.a[0], t.b[1], t.b[0]);
+      const r = await rpc('corridor', { pairs });
+      corrMax = r.max || 0;
+      const m = Math.max(1, corrMax);
+      S.corrList = r.list.map((x) => x.ix.map((i) => list[i].k));
+      setData('corr', { type: 'FeatureCollection', features: r.list.map((x, i) => ln(x.c, { n: x.n, v: Math.sqrt(x.n / m), i })) });
+      renderCtx();
+    } catch (err) { console.warn('corridor', err); }
+    finally {
+      corrBusy = false;
+      if (corrNext) { const n = corrNext; corrNext = null; updateCorridor(n); }
     }
-    const t = S.trips[+p.k]; if (!t) return;
+  }
+
+  // all trips under the finger (overlapping lines, or one street section in "Häufigkeit")
+  function tripsNear(point) {
+    const r = isDesktop() ? 7 : 14, box = [[point.x - r, point.y - r], [point.x + r, point.y + r]];
+    // "Häufigkeit": exactly the trips counted on the tapped section, so number and list agree
+    let fs = S.o.color === 'freq' && isVis('trips-corr') ? map.queryRenderedFeatures(box, { layers: ['trips-corr'] }) : [];
+    if (fs.length) fs = [fs.sort((a, b) => b.properties.n - a.properties.n)[0]];
+    else fs = map.queryRenderedFeatures(box, { layers: ['trips-pt', 'trips-grad', 'trips-seg'].filter(isVis) });
+    const ks = new Set();
+    for (const f of fs) {
+      const p = f.properties;
+      if (f.layer.id === 'trips-corr') { for (const k of S.corrList?.[+p.i] || []) ks.add(k); }
+      else if (p.k != null && !+p.away) ks.add(+p.k);
+    }
+    return [...ks];
+  }
+  // a list to pick from; only these trips stay on the map
+  function showTripPicker(ks) {
+    const list = ks.map((k) => S.trips[k]).filter(Boolean).sort((a, b) => b.e - a.e);
+    const items = list.map((t) => ({ type: 'move', kind: 'trip', a: t.a, b: t.b, route: t.route?.c || null, len: t.route?.len, d: t.d, s: t.s, e: t.e, bike: t.bike, from: t.from, to: t.to }));
+    S.histWant = null; S.histToken = {};
+    S.hist = { type: 'group', items };
+    drawHist();
+    const place = (x) => (x ? esc(x) : 'frei');
     showDetail('#detail', `
-      <p class="kicker"><span class="dot" style="background:${C.trip}"></span>Fahrt, geschätzt</p>
-      <h3>Rad ${esc(t.bike)}</h3>
-      <dl class="kv"><dt>Von</dt><dd>${t.from ? esc(t.from) : 'frei abgestellt'}</dd><dt>Nach</dt><dd>${t.to ? esc(t.to) : 'frei abgestellt'}</dd>
-        <dt>Zeit</dt><dd>${t.short ? 'zwischen' : 'etwa'} ${fTime.format(new Date(t.s * 1000))} und ${fTime.format(new Date(t.e * 1000))} Uhr</dd>
-        <dt>Strecke</dt><dd>${t.route ? `~${fmtDist(t.route.len)} (geschätzter Weg)` : `${fmtDist(t.d)} Luftlinie`}</dd></dl>
-      <p class="hint">Start und Ziel sind gemessen. Der Weg dazwischen ist der günstigste Radweg laut OpenStreetMap, nicht der tatsächlich gefahrene.</p>
-      <div class="actions"><button class="btn sm" data-act="trail" data-id="${esc(t.bike)}">Verlauf von Rad ${esc(t.bike)}</button></div>`);
+      <p class="kicker">Hier überlagern sich</p>
+      <h3>${nf.format(items.length)} Fahrten</h3>
+      <p class="hint">Antippen hebt eine Fahrt hervor, „Profil“ zeigt den ganzen Verlauf des Rads.</p>
+      <ul class="rows hist">${items.slice(0, 150).map((it, n) => `<li class="hrow trip" data-n="${n}"><button class="rowbtn" data-act="hfocus" data-n="${n}">
+        <span class="ic route"></span>
+        <span class="main"><b>Rad ${esc(it.bike)}</b><small>${place(it.from)} → ${place(it.to)} · ${tm(it.s)}–${tm(it.e)} · ${it.len ? `~${fmtDist(it.len)}` : fmtDist(it.d)}</small></span></button>
+        <button class="mini" data-act="trail" data-id="${esc(it.bike)}" aria-label="Profil von Rad ${esc(it.bike)}">Profil</button></li>`).join('')}</ul>
+      ${items.length > 150 ? `<p class="hint">Die neuesten 150 von ${nf.format(items.length)}.</p>` : ''}
+      <div class="actions"><button class="btn sm ghost" data-act="cleartrail">Auswahl aufheben</button></div>`, { keepSel: true });
+    fitHist();
+  }
+
+  // tap on a trip: open the bike's profile with this trip highlighted
+  function openTrip(p) {
+    if (+p.away) { showBikeHistory(p.bike, { away: { since: +p.since, from: p.from } }); return; }
+    const t = S.trips?.[+p.k]; if (!t) return;
+    showBikeHistory(t.bike, { trip: t });
   }
 
   // ---- scrubber (the last position is "Live")
@@ -946,7 +1002,7 @@
       b.bike_type != null && ['Typ-Code', b.bike_type],
     ].filter(Boolean);
     const route = `https://www.google.com/maps/dir/?api=1&destination=${b.lat},${b.lng}&travelmode=walking`;
-    showDetail(S.mode === 'analyse' ? '#detailA' : '#detail', `
+    showDetail('#detail', `
       <p class="kicker"><span class="dot" style="background:${st ? C.station : C.free}"></span>${st ? 'An einer Station' : 'Frei abgestellt'}${S.me ? `, ${fmtDist(hav(S.me[1], S.me[0], b.lat, b.lng))} entfernt` : ''}</p>
       <h3>Rad ${esc(b.bike)}</h3>
       <dl class="kv">${rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('')}</dl>
@@ -978,7 +1034,7 @@
     flyTo([st.lng, st.lat]);
     S.histWant = { type: 'station', uid: String(uid), at: [st.lng, st.lat], name: st.name };
     loadStationMoves(String(uid), [st.lng, st.lat], st.name);
-    stationQuery(String(uid), true, '#stHist').catch(() => { const el = $('#stHist'); if (el) el.innerHTML = ''; });
+    stationQuery(String(uid), '#stHist').catch(() => { const el = $('#stHist'); if (el) el.innerHTML = ''; });
   }
 
   function showTlBike(i) {
@@ -1034,16 +1090,16 @@
         <button class="btn sm ghost" type="button" data-act="hcustom">Anwenden</button></details></div>`;
   }
   const HIST_LEGEND = `<div class="hlegend">
-    <span><i class="lg st"></i>an Station</span><span><i class="lg fr"></i>frei abgestellt</span>
-    <span><i class="lg snap"></i>Snapshot</span><span><i class="lg route"></i>Fahrt (Weg geschätzt)</span></div>`;
+    <span><i class="lg st"></i>an Station</span><span><i class="lg fr"></i>frei abgestellt</span><span><i class="lg snap"></i>Snapshot</span>
+    <span><i class="lg ts"></i><i class="lg route"></i><i class="lg te"></i>Fahrt: Start → Ziel, Weg geschätzt</span></div>`;
 
-  async function showTrailFor(id) { return showBikeHistory(id); }
-  async function showBikeHistory(id) {
-    if (S.mode !== 'karte') setMode('karte');
+  async function showBikeHistory(id, opts = {}) {
     const token = S.histToken = {};
+    S.histWant = { type: 'bike', id };
     showDetail('#detail', `<p class="kicker">Verlauf</p><h3>Rad ${esc(id)}</h3>${periodCtl()}<div id="histBody"><span class="busy">wird geladen</span></div>`, { keepSel: true });
     try { await ensureIndex(); } catch { $('#histBody').innerHTML = '<p class="hint">Noch kein Verlauf vorhanden.</p>'; return; }
-    const [t0, t1] = histRange();
+    let [t0, t1] = histRange();
+    if (opts.trip && opts.trip.e > t1) t1 = Math.ceil(opts.trip.e + 120); // a trip still running at the shown moment
     let r;
     try { r = await rpc('bikeTrail', { bike: String(id), t0, t1, P: tripParams(), dates: datesFor(t0, t1) }); }
     catch (err) { if (S.histToken === token) $('#histBody').innerHTML = `<p class="hint">Fehler: ${esc(err.message.split('\n')[0])}</p>`; return; }
@@ -1051,29 +1107,28 @@
     const items = [];
     r.stays.forEach((st, k) => { items.push({ type: 'stay', ...st }); if (r.moves[k]) items.push({ type: 'move', ...r.moves[k] }); });
     S.hist = { type: 'bike', id, items, routing: r.routing, leftAt: r.leftAt, polls: r.polls, t0, t1 };
-    drawHist(); renderBikeHist(); fitHist();
+    renderBikeHist();
+    const fn = opts.trip ? items.findIndex((x) => x.type === 'move' && x.kind === 'trip' && x.t0 <= opts.trip.s + 1 && x.t1 >= opts.trip.e - 1) : -1;
+    if (fn >= 0) histFocus(fn); else { drawHist(); fitHist(); }
   }
 
   function drawHist(hi = -1) {
     const H = S.hist; if (!H) { setData('hist', EMPTY); applyVisibility(); return; }
     const f = [];
-    const dim = (n) => (hi >= 0 && n !== hi ? 1 : 0);
+    const flags = (n) => ({ n, hi: n === hi ? 1 : 0, dim: hi >= 0 && n !== hi ? 1 : 0 });
     H.items.forEach((it, n) => {
       if (it.type === 'stay') {
         const dur = Math.max(0, it.t1 - it.t0);
-        if (it.pts && it.pts.length > 1) for (const p of it.pts) f.push({ type: 'Feature', geometry: { type: 'Point', coordinates: p }, properties: { kind: 'snap' } });
-        f.push({ type: 'Feature', geometry: { type: 'Point', coordinates: [it.lng, it.lat] },
-          properties: { kind: 'stay', st: it.st >= 0 ? 1 : 0, r: Math.min(5, Math.max(0, Math.log2(1 + dur / 1800))), n, hi: n === hi ? 1 : 0, dim: dim(n) } });
-      } else {
-        const a = H.type === 'bike' ? H.items[n - 1] : null, b = H.type === 'bike' ? H.items[n + 1] : null;
-        const kind = it.kind === 'shift' ? 'shift' : it.route ? 'route' : 'air';
-        const c = it.route || (a && b ? [[a.lng, a.lat], [b.lng, b.lat]] : [it.a, it.b]);
-        f.push({ type: 'Feature', geometry: { type: 'LineString', coordinates: c }, properties: { kind, n, hi: n === hi ? 1 : 0, dim: dim(n) } });
-        if (H.type === 'station') { // the other end of the trip
-          const o = it.out ? it.b : it.a;
-          f.push({ type: 'Feature', geometry: { type: 'Point', coordinates: o }, properties: { kind: 'stay', st: it.other ? 1 : 0, r: 0, n, hi: n === hi ? 1 : 0, dim: dim(n) } });
-        }
+        if (it.pts && it.pts.length > 1) for (const p of it.pts) f.push(pt(p, { kind: 'snap' }));
+        f.push(pt([it.lng, it.lat], { kind: 'stay', st: it.st >= 0 ? 1 : 0, r: Math.min(5, Math.max(0, Math.log2(1 + dur / 1800))), ...flags(n) }));
+        return;
       }
+      const a = H.type === 'bike' ? H.items[n - 1] : null, b = H.type === 'bike' ? H.items[n + 1] : null;
+      const s0 = a ? [a.lng, a.lat] : it.a, s1 = b ? [b.lng, b.lat] : it.b;
+      if (it.kind === 'shift') { f.push(ln([s0, s1], { kind: 'shift', ...flags(n) })); return; }
+      const c = it.route || [s0, s1];
+      f.push(ln(c, { kind: it.route ? 'route' : 'air', ...flags(n) }));
+      f.push(pt(c[0], { kind: 'ts', ...flags(n) }), pt(c[c.length - 1], { kind: 'te', ...flags(n) }));
     });
     setData('hist', { type: 'FeatureCollection', features: f });
     applyVisibility();
@@ -1121,7 +1176,7 @@
         const dur = it.t1 - it.t0;
         rows.push(`<li class="hrow trip" data-n="${n}"><button class="rowbtn" data-act="hfocus" data-n="${n}">
           <span class="ic route"></span>
-          <span class="main"><b>${it.service ? 'Lange weg (Werkstatt oder Umverteilung?)' : 'Fahrt'}</b><small>${tm(it.t0)} → ${tm(it.t1)} · ${it.len ? `~${fmtDist(it.len)} Weg (geschätzt)` : `${fmtDist(it.d)} Luftlinie`}</small></span>
+          <span class="main"><b>${it.service ? 'Lange weg (Werkstatt oder Umverteilung?)' : `Fahrt${it.absent ? '' : ' zwischen zwei Abfragen'}`}</b><small>${tm(it.t0)} → ${tm(it.t1)} · ${it.len ? `~${fmtDist(it.len)} Weg (geschätzt)` : `${fmtDist(it.d)} Luftlinie`}</small></span>
           <span class="val">${it.absent ? fmtDur(Math.max(60, dur)) : '<small>zwischen 2 Abfragen</small>'}</span></button></li>`);
       } else {
         rows.push(`<li class="hrow shift" data-n="${n}"><button class="rowbtn" data-act="hfocus" data-n="${n}"><span class="ic shift"></span>
@@ -1212,333 +1267,63 @@
       <button class="btn sm ghost" id="btnNear2" type="button">Standort aktualisieren</button></div>`;
   }
 
-  // ================================================================ ANALYSE: filters
-  const WD_NAMES = ['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'];
-  const FILTER_KEY = 'kvb-filter-v4';
-  const DEFAULT_F = () => {
-    const h = localHour(now());
-    return { range: 14, from: null, to: null, wd: [1, 1, 1, 1, 1, 1, 1], a: h * 4, b: h * 4 + 4,
-      kind: 'all', reachMetric: 'median', R: 200, res: 50, smooth: 75,
-      minGone: 100, jump: 300, maxDurH: 4, cell: 250, top: 150, min: 1,
-      stMetric: 'avg', k: 0, idleMin: 0 };
-  };
-  function loadFilter() {
-    try { const s = JSON.parse(localStorage.getItem(FILTER_KEY) || 'null'); if (s && Array.isArray(s.wd)) return normWin({ ...DEFAULT_F(), ...s }); } catch { /* ignore */ }
-    return DEFAULT_F();
-  }
-  // the time window is always start < end within one day (00:00–24:00), in 15-min steps
-  function normWin(f) {
-    let a = Math.round(+f.a), b = Math.round(+f.b);
-    if (!Number.isFinite(a) || !Number.isFinite(b)) { a = 0; b = 96; }
-    a = Math.min(95, Math.max(0, a)); b = Math.min(96, Math.max(1, b));
-    if (b <= a) { a = 0; b = 96; }
-    f.a = a; f.b = b;
-    return f;
-  }
-  const wholeDay = () => S.f.a === 0 && S.f.b === 96;
-  function saveFilter() { try { localStorage.setItem(FILTER_KEY, JSON.stringify(S.f)); } catch { /* ignore */ } }
-
-  const winMin = () => (wholeDay() ? { t0: 0, t1: 0 } : { t0: S.f.a * 15, t1: S.f.b * 15 });
-  const winLabel = () => (wholeDay() ? 'ganzer Tag' : `${minToStr(S.f.a * 15)}–${S.f.b === 96 ? '24:00' : minToStr(S.f.b * 15)}`);
-  const wdLabel = (wd = S.f.wd) => {
-    const key = wd.map((x) => (x ? 1 : 0)).join('');
-    if (key === '1111111') return 'alle Tage';
-    if (key === '1111100') return 'Mo–Fr';
-    if (key === '0000011') return 'Sa/So';
-    if (key === '0000000') return 'keine Tage';
-    return WD_NAMES.filter((_, i) => wd[i]).join(', ');
-  };
-  function filterDates() {
+  // ================================================================ availability overlay
+  // One overlay, three measures of the same thing: chance of a bike within R,
+  // typical walk to the nearest bike, bikes per hectare. Basis: the time of day
+  // of the trip window, over the last N days (and chosen weekdays).
+  const R_OPTS = [50, 100, 150, 200, 300, 400, 500];
+  const WD_MASK = { all: [1, 1, 1, 1, 1, 1, 1], wk: [1, 1, 1, 1, 1, 0, 0], we: [0, 0, 0, 0, 0, 1, 1] };
+  const WD_LABEL = { all: 'alle Tage', wk: 'Mo–Fr', we: 'Sa/So' };
+  const fHM = new Intl.DateTimeFormat('de-DE', { hour: 'numeric', minute: 'numeric', hourCycle: 'h23', timeZone: TZ });
+  const localMin = (t) => { const p = fHM.formatToParts(new Date(t * 1000)); return (+p.find((x) => x.type === 'hour').value % 24) * 60 + +p.find((x) => x.type === 'minute').value; };
+  const shownTime = () => (S.k.isLive || !S.tl ? (S.live?.t || now()) : S.k.clock);
+  function availBasis() {
+    const B = shownTime();
+    let t0 = 0, t1 = 0, label = 'ganzer Tag';
+    if (S.o.win < 1440) {
+      const e = Math.ceil(localMin(B) / 15) * 15, w = Math.max(15, Math.round(S.o.win / 15) * 15);
+      t1 = e % 1440; t0 = (((e - w) % 1440) + 1440) % 1440;
+      label = `${minToStr(t0)}–${t1 === 0 ? '24:00' : minToStr(t1)} Uhr`;
+    }
     const idx = tlIndex || [];
-    if (!idx.length) return { from: '', to: '', dates: [] };
-    let from, to;
-    if (S.f.range === 'custom' && S.f.from && S.f.to) { from = S.f.from; to = S.f.to; }
-    else if (S.f.range === 'all') { from = firstDate(); to = lastDate(); }
-    else { to = lastDate(); from = addDays(to, -(+S.f.range - 1)); }
-    if (from > to) [from, to] = [to, from];
-    return { from, to, dates: idx.map((d) => d.date).filter((d) => d >= from && d <= to) };
+    const last = idx.length ? lastDate() : isoLocal(B);
+    const to = isoLocal(B) < last ? isoLocal(B) : last;
+    const from = addDays(to, -(S.o.days - 1));
+    const dates = idx.map((d) => d.date).filter((d) => d >= from && d <= to);
+    return { F: { from, to, wd: WD_MASK[S.o.wd].map(Boolean), t0, t1, kind: 'all' }, dates, label, from, to };
   }
-  function F() {
-    const { from, to } = filterDates();
-    const { t0, t1 } = winMin();
-    return { from, to, wd: S.f.wd.map(Boolean), t0, t1, kind: S.f.kind };
+  function viewBBox() {
+    const b = map.getBounds(), padLng = (b.getEast() - b.getWest()) * 0.15, padLat = (b.getNorth() - b.getSouth()) * 0.15;
+    const r = (x) => Math.round(x * 500) / 500; // stable keys while panning a little
+    return { s: r(b.getSouth() - padLat), n: r(b.getNorth() + padLat), w: r(b.getWest() - padLng), e: r(b.getEast() + padLng) };
   }
-  const tripParams = () => ({ minGone: S.f?.minGone ?? 100, jump: S.f?.jump ?? 300, maxDur: (S.f?.maxDurH ?? 4) * 3600 });
-  const rangeLabel = () => { const { from, to } = filterDates(); return from ? (from === to ? fmtD(from) : `${fmtD(from)}–${fmtD(to)}`) : ''; };
-
-  // what each tab answers, and how it is computed
-  const TABS = {
-    erreichbarkeit: {
-      lead: 'Wie weit läufst du zum nächsten Rad?',
-      how: `<p><b>Pro Abfrage:</b> Für jedes Feld der Karte (50 × 50 m) wird die Luftlinie zum nächsten abgestellten Rad bestimmt. Das ist ein Schnappschuss: „Wenn ich um 08:13 hier gestanden hätte, wie weit wäre das nächste Rad gewesen?“</p>
-        <p><b>Über den Zeitraum:</b> Für jedes Feld werden diese Abstände aus allen Abfragen im Filter gesammelt. Gezeigt wird nicht der Mittelwert, sondern der <b>Median</b>: In der Hälfte der Abfragen war ein Rad näher, in der anderen Hälfte weiter weg. Der Median ist robust gegen seltene Ausreißer (etwa ein einzelner Moment, in dem alle Räder in der Nähe gerade unterwegs waren), die einen Mittelwert stark verzerren würden. Jede Abfrage zählt gleich viel. Bei mehr als 150 passenden Abfragen wird eine gleichmäßig über den Zeitraum verteilte Stichprobe von 150 genutzt.</p>
-        <p><b>Chance im Umkreis</b> nutzt dieselben Abstände: der Anteil der Abfragen, in denen der Abstand höchstens so groß war wie der gewählte Umkreis.</p>
-        <p><b>Grenzen:</b> Luftlinie, nicht Fußweg (der echte Weg ist meist ein Viertel bis ein Drittel länger). Genauigkeit etwa ±25 m durch das Raster. Tippen auf die Karte rechnet für genau diesen Punkt ohne Raster.</p>`,
-    },
-    dichte: {
-      lead: 'Wo stehen im Schnitt die meisten Räder?',
-      how: `<p>Pro Abfrage werden die abgestellten Räder je Feld gezählt, über alle Abfragen im Filter gemittelt (hier wirklich der Mittelwert) und leicht geglättet. Einheit: Räder pro Hektar (100 × 100 m).</p>
-        <p><b>Unterschied zur Erreichbarkeit:</b> Dichte fragt „wie viele?“, Erreichbarkeit „wie weit bis zum ersten?“. In der dichten Innenstadt sehen beide ähnlich aus. Auseinander gehen sie hier:</p>
-        <ul><li>Eine Station mit 20 Rädern ist bei der Dichte ein heller Fleck, bei der Erreichbarkeit nur gut im Umkreis von wenigen hundert Metern.</li>
-        <li>Ein Viertel mit einem Rad alle 150 m hat kaum Dichte, aber gute Erreichbarkeit.</li></ul>
-        <p>Für „finde ich hier ein Rad?“ ist die Erreichbarkeit die richtige Ansicht. Die Dichte zeigt, wo sich die Flotte sammelt.</p>`,
-    },
-    stroeme: {
-      lead: 'Wohin fahren die Räder?',
-      how: `<p>Eine Fahrt wird geschätzt, wenn ein Rad aus dem Feed verschwindet und an anderer Stelle wieder auftaucht, oder zwischen zwei Abfragen weit springt. Zugeordnet wird sie ihrer Startzeit. Liegen zwischen zwei Abfragen mehr als eine Stunde (ausgefallene Abfragen), ist der Zeitpunkt unklar, solche Bewegungen werden nicht gezählt.</p>
-        <ul><li><b>Linien</b>: die häufigsten Verbindungen zwischen Start- und Zielbereich. Die Punkte wandern in Fahrtrichtung, dickere Linie bedeutet mehr Fahrten.</li>
-        <li><b>Kreise</b>: Bilanz je Bereich. Rot heißt, hier beginnen mehr Fahrten als enden (Räder fließen ab), blau das Gegenteil. Größe = Anzahl.</li></ul>
-        <p>Mit ▶ wandert das Zeitfenster durch den Tag. Einzelne Fahrten in Echtzeit zeigt die Ansicht „Karte“ beim Abspielen.</p>`,
-    },
-    nutzung: {
-      lead: 'Wie viel wird gefahren, wann und wie weit?',
-      how: `<p>Grundlage sind dieselben geschätzten Fahrten wie bei „Ströme“. „Unterwegs“ zählt zu jeder Abfrage die Fahrten, die gerade laufen.</p>
-        <p>Fahrten, die zwischen zwei Abfragen beginnen und enden, haben keine messbare Dauer. Lange Abwesenheiten zählen als Werkstatt oder Umverteilung. Umverteilung per Transporter lässt sich nicht sicher von Fahrten trennen.</p>`,
-    },
-    stationen: {
-      lead: 'Wie voll sind die Stationen typischerweise?',
-      how: `<p>Pro Abfrage werden die Räder an jeder Station gezählt.</p>
-        <ul><li><b>Ø Räder</b>: Mittelwert über alle Abfragen im Filter.</li>
-        <li><b>Chance leer</b>: Anteil der Abfragen, in denen höchstens so viele Räder dort standen wie eingestellt (Standard: keins).</li></ul>
-        <p>Station antippen zeigt den Verlauf über den Tag.</p>`,
-    },
-    standzeit: {
-      lead: 'Wie lange stehen Räder unbewegt am selben Ort?',
-      how: `<p>Ein Rad gilt als bewegt, wenn es aus dem Feed verschwindet (gefahren oder abgeholt) oder sich mehr als 100 m verschiebt. Gezeigt wird die Zeit seit der letzten Bewegung, Stand jetzt.</p>
-        <p>Genauigkeit: so fein wie der Abfrageabstand (etwa 13 Minuten). Standzeiten, die vor Beginn der Aufzeichnung anfingen, sind Mindestwerte.</p>`,
-    },
-  };
-
-  function syncFilterUI() {
-    const { a, b } = S.f;
-    $('#wA').value = a; $('#wB').value = b;
-    $('#wLabel').textContent = winLabel();
-    $('#wDays').textContent = wdLabel();
-    const fill = $('#wFill');
-    fill.style.left = `calc(12px + (100% - 24px) * ${a / 96})`; fill.style.width = `calc((100% - 24px) * ${(b - a) / 96})`;
-    drawCoverage();
-    const idle = S.tab === 'standzeit';
-    $('#timeBar').hidden = idle;
-    $('#aLead').textContent = TABS[S.tab].lead;
-    $('#fSumText').textContent = idle ? 'Filter und Erklärung' : `Filter: ${wdLabel()}, ${rangeLabel()}`;
-    $('#wA').setAttribute('aria-valuetext', minToStr(a * 15));
-    $('#wB').setAttribute('aria-valuetext', b === 96 ? '24:00' : minToStr(b * 15));
+  let ovSeq = 0, ovTimer = 0, ovKey = '', ovInfo = null;
+  function scheduleOverlay(delay = 300) {
+    if (!S.layers.avail || ovTimer) return;
+    ovTimer = setTimeout(() => { ovTimer = 0; computeOverlay(); }, delay);
   }
-
-  const FMT = {
-    smooth: (v) => (+v ? `${v} m` : 'aus'), minGone: (v) => `${v} m`, jump: (v) => `${v} m`,
-    maxDurH: (v) => `${nf1.format(v)} Std.`, cell: (v) => fmtDist(+v), top: (v) => `${v}`, min: (v) => `${v}`,
-    k: (v) => (+v ? `höchstens ${v} ${+v === 1 ? 'Rad' : 'Räder'}` : 'kein Rad'),
-  };
-  const IDLE_STEPS = [0, 900, 1800, 3600, 7200, 4 * 3600, 8 * 3600, 86400, 2 * 86400, 3 * 86400, 7 * 86400];
-  const idleLabel = (s) => (s ? `mind. ${fmtDur(s)}` : 'alle');
-
-  function slider(id, label, min, max, step, val, fmt) {
-    return `<div class="row"><h3><label for="${id}">${label}</label><output id="${id}-o">${fmt(val)}</output></h3>
-      <input class="slider" type="range" id="${id}" min="${min}" max="${max}" step="${step}" value="${val}" data-param="${id.replace('p-', '')}"></div>`;
-  }
-  function seg(key, label, opts) {
-    return `<div class="row"><h3>${label}</h3><div class="seg" role="radiogroup" data-seg="${key}">
-      ${opts.map(([v, l]) => `<button role="radio" data-v="${v}" aria-checked="${String(S.f[key]) === String(v)}">${l}</button>`).join('')}</div></div>`;
-  }
-  const kindSeg = () => seg('kind', 'Welche Räder', [['all', 'Alle'], ['free', 'Frei'], ['station', 'An Station']]);
-  const resSeg = () => seg('res', 'Kartenauflösung', [[50, '50 m'], [100, '100 m'], [200, '200 m']]);
-  const R_OPTS = [50, 100, 150, 200, 300, 400, 500, 700, 1000];
-
-  function tabParams() {
-    const f = S.f;
-    switch (S.tab) {
-      case 'erreichbarkeit':
-        return seg('reachMetric', 'Darstellung', [['median', 'Laufweg'], ['prob', 'Chance im Umkreis']])
-          + (f.reachMetric === 'prob' ? `<div class="row"><h3>Umkreis</h3><div class="chips tight" data-seg="R">${R_OPTS.map((r) => `<button class="chip${f.R === r ? ' on' : ''}" data-v="${r}" aria-pressed="${f.R === r}">${r} m</button>`).join('')}</div></div>` : '')
-          + kindSeg() + resSeg();
-      case 'dichte': return slider('p-smooth', 'Glättung', 0, 300, 25, f.smooth, FMT.smooth) + kindSeg() + resSeg();
-      case 'nutzung': return tripSliders();
-      case 'stroeme': return slider('p-cell', 'Größe der Start- und Zielbereiche', 100, 2000, 50, f.cell, FMT.cell)
-        + slider('p-top', 'Höchstens so viele Verbindungen', 10, 400, 10, f.top, FMT.top) + slider('p-min', 'Mindestens Fahrten je Verbindung', 1, 20, 1, f.min, FMT.min) + tripSliders();
-      case 'stationen': return seg('stMetric', 'Farbe zeigt', [['avg', 'Ø Räder'], ['empty', 'Chance leer']]) + slider('p-k', 'Als „leer“ gilt', 0, 5, 1, f.k, FMT.k);
-      case 'standzeit': return `<div class="row"><h3><label for="p-idle">Nur Räder, die unbewegt sind seit</label><output id="p-idle-o">${idleLabel(f.idleMin)}</output></h3>
-        <input class="slider" type="range" id="p-idle" min="0" max="${IDLE_STEPS.length - 1}" step="1" value="${Math.max(0, IDLE_STEPS.indexOf(f.idleMin))}"></div>` + kindSeg();
-      default: return '';
-    }
-  }
-  function tripSliders() {
-    const f = S.f;
-    return `<h3 class="group">Wann zählt etwas als Fahrt?</h3>`
-      + slider('p-minGone', 'Rad verschwindet und taucht mindestens so weit entfernt wieder auf', 50, 1000, 50, f.minGone, FMT.minGone)
-      + slider('p-jump', 'oder springt zwischen zwei Abfragen weiter als', 100, 2000, 100, f.jump, FMT.jump)
-      + slider('p-maxDurH', 'Länger weg = Werkstatt oder Umverteilung', 0.5, 12, 0.5, f.maxDurH, FMT.maxDurH);
-  }
-
-  const WIN_PRESETS = [['Ganzer Tag', 0, 96], ['Nachts 0–6', 0, 24], ['Morgens 6–10', 24, 40], ['Tagsüber 10–16', 40, 64], ['Abends 16–20', 64, 80], ['Spätabends 20–24', 80, 96]];
-  function filterBlock() {
-    const { from, to } = filterDates();
-    const min = tlIndex?.length ? firstDate() : '', max = tlIndex?.length ? lastDate() : '';
-    const common = S.tab === 'standzeit' ? '' : `
-      <div class="row"><h3>Zeitraum</h3>
-        <div class="seg" role="radiogroup" data-seg="range">
-          ${[[7, '7 Tage'], [14, '14 Tage'], [28, '28 Tage'], ['all', 'Alles']].map(([v, l]) => `<button role="radio" data-v="${v}" aria-checked="${String(S.f.range) === String(v)}">${l}</button>`).join('')}
-        </div>
-        <div class="dates">
-          <label class="field">von <input type="date" id="fFrom" value="${from}" min="${min}" max="${max}"></label>
-          <label class="field">bis <input type="date" id="fTo" value="${to}" min="${min}" max="${max}"></label>
-        </div></div>
-      <div class="row"><h3>Wochentage</h3>
-        <div class="wdays">${WD_NAMES.map((n, i) => `<button type="button" data-wd="${i}" aria-pressed="${!!S.f.wd[i]}">${n}</button>`).join('')}</div>
-        <div class="quick"><button data-wdp="1111111">Alle</button><button data-wdp="1111100">Mo–Fr</button><button data-wdp="0000011">Sa/So</button></div></div>
-      <div class="row"><h3>Uhrzeit</h3>
-        <div class="quick">${WIN_PRESETS.map(([l, a, b]) => `<button data-win="${a},${b}" aria-pressed="${S.f.a === a && S.f.b === b}">${l}</button>`).join('')}</div>
-        <p class="hint">Oder oben am Regler: Griffe ziehen ändert Beginn und Ende, den dunklen Balken ziehen verschiebt das ganze Fenster. Die grauen Säulen darüber zeigen, zu welchen Uhrzeiten es Abfragen gibt.</p></div>`;
-    return `<details class="explain"><summary>So wird gerechnet</summary>${TABS[S.tab].how}</details>
-      <div class="block filters" id="filters"><h2>Filter</h2>${common}${tabParams()}</div>`;
-  }
-
-  // ================================================================ ANALYSE: compute + render
-  let anSeq = 0, anTimer = 0;
-  async function enterAnalysis() {
-    for (const b of $$('#aTabs button')) b.setAttribute('aria-selected', String(b.dataset.tab === S.tab));
-    stopParticles();
-    applyVisibility();
-    $('#aLegend').innerHTML = '';
-    try { await ensureIndex(); } catch {
-      syncFilterUI();
-      $('#aMore').innerHTML = '<div class="empty">Noch keine Verlaufsdaten vorhanden. Sie entstehen automatisch mit den nächsten Abfragen.</div>';
-      return;
-    }
-    if (S.mode !== 'analyse') return;
-    syncFilterUI();
-    $('#aMore').innerHTML = `${filterBlock()}<div class="block" id="aOut"><span class="busy">rechnet</span></div>`;
-    bindFilterInputs();
-    refreshSheet();
-    compute();
-  }
-
-  function scheduleCompute(delay = 120) {
-    clearTimeout(anTimer);
-    anTimer = setTimeout(compute, delay);
-    setBusy();
-  }
-
-  // ---- one status line in the peek, the same for every tab
-  const plural = (n, one, many) => `${nf.format(n)} ${n === 1 ? one : many}`;
-  function setBusy() {
-    const el = $('#aStatus');
-    if (!el || S.tab === 'standzeit') return;
-    if (!$('.busy', el)) { el.className = 'astatus'; el.innerHTML = '<span class="busy">rechnet …</span>'; }
-  }
-  function widenButtons() {
-    const b = [];
-    if (!wholeDay()) b.push(['day', 'Ganzer Tag']);
-    if (S.f.wd.some((x) => !x)) b.push(['wd', 'Alle Wochentage']);
-    if (S.f.range !== 'all') b.push(['range', 'Ganzer Zeitraum']);
-    return b.map(([w, l]) => `<button class="btn sm" type="button" data-act="widen" data-w="${w}">${l}</button>`).join('');
-  }
-  function setStatus(msg, kind = '') {
-    const el = $('#aStatus');
-    el.className = `astatus${kind ? ` ${kind}` : ''}`;
-    el.innerHTML = `<span class="msg">${msg}</span>${kind === 'none' ? `<span class="acts">${widenButtons()}</span>` : ''}`;
-    refreshSheet();
-  }
-  const basisText = (polls, days) => `${plural(polls, 'Abfrage', 'Abfragen')} an ${plural(days, 'Tag', 'Tagen')}`;
-  // normal result: what the numbers are based on; warns when that is thin
-  function statusOk(polls, days, lead = '') {
-    const thin = polls < 30;
-    setStatus(`${lead ? `<b>${lead}</b> · ` : ''}Grundlage: ${basisText(polls, days)}.${thin ? ' Noch wenig Daten, Werte eher zufällig.' : ''}`, thin ? 'warn' : '');
-  }
-  function statusNone(what) {
-    setStatus(`<b>${what}</b> ${wholeDay() ? '' : 'Die grauen Säulen über dem Regler zeigen, wann es Daten gibt.'}`, 'none');
-  }
-
-  // ---- data coverage above the time slider (polls per 15 min, date range + weekdays)
-  function drawCoverage() {
-    const svg = $('#wCov'); if (!svg) return;
-    const c = S.cov;
-    if (!c) { svg.innerHTML = ''; return; }
-    const max = Math.max(1, ...c.bins);
-    let h = '';
-    for (let i = 0; i < 96; i++) {
-      if (!c.bins[i]) continue;
-      const v = 2.5 + 7.5 * Math.sqrt(c.bins[i] / max);
-      h += `<rect x="${i + 0.12}" y="${10 - v}" width="0.76" height="${v}"${i >= S.f.a && i < S.f.b ? ' class="in"' : ''}/>`;
-    }
-    svg.innerHTML = h;
-  }
-
-  function coverageText() {
-    if (!tlIndex?.length) return '';
-    const days = tlIndex.slice(-5).map((d) => `${fDate.format(new Date(d.t0 * 1000))} ${fTime.format(new Date(d.t0 * 1000))}–${fTime.format(new Date(d.t1 * 1000))} Uhr`);
-    return `${tlIndex.length > 5 ? '… ' : ''}${days.join(', ')}`;
-  }
-  // body text under an empty result (the actions sit in the status line in the peek)
-  function emptyState(what) {
-    return `<div class="empty"><b>${what}</b><p>Daten gibt es bisher für: ${esc(coverageText())}.</p></div>`;
-  }
-  // clear everything a tab draws on the map, so an empty result never leaves old shapes behind
-  function clearAnalysisLayers() {
-    clearRaster(); legendClear(); stopParticles();
-    flowLines = [];
-    for (const id of ['flows', 'netc', 'anst']) setData(id, EMPTY);
-  }
-
-  async function compute() {
-    if (S.mode !== 'analyse') return;
-    const seq = ++anSeq;
-    const { dates } = filterDates();
-    const f = F();
-    const out = () => $('#aOut');
-    setBusy();
-    const none = (status, body) => { clearAnalysisLayers(); statusNone(status); out().innerHTML = emptyState(body || status); };
+  async function computeOverlay(force) {
+    if (!S.layers.avail || !styleReady) return;
+    try { await ensureIndex(); } catch { ovInfo = { err: 'Noch kein Verlauf vorhanden.' }; renderCtx(); return; }
+    const b = availBasis();
+    const bb = S.o.res < 25 ? viewBBox() : null;
+    const key = JSON.stringify([b.F, b.dates, S.o.metric, S.o.R, S.o.res, bb]);
+    if (!force && key === ovKey) return;
+    ovKey = key;
+    const seq = ++ovSeq;
+    ovInfo = { ...(ovInfo || {}), busy: true, label: b.label };
+    renderCtx();
+    if (!b.dates.length) { clearRaster(); ovInfo = { err: 'Für diese Tage gibt es noch keine Daten.' }; renderCtx(); return; }
     try {
-      if (S.tab === 'standzeit') { $('#aStatus').innerHTML = ''; renderIdle(); return; }
-      if (!dates.length) { S.cov = null; drawCoverage(); none('Im gewählten Zeitraum gibt es keine Daten.'); return; }
-      if (!f.wd.some(Boolean)) { S.cov = null; drawCoverage(); clearAnalysisLayers(); setStatus('<b>Kein Wochentag gewählt.</b>', 'none'); out().innerHTML = ''; return; }
-      // same check for every tab: are there polls in this filter at all?
-      const cov = await rpc('coverage', { F: f, dates });
-      if (seq !== anSeq) return;
-      S.cov = cov; drawCoverage();
-      if (!cov.polls) {
-        none(`Zwischen ${winLabel()} Uhr gibt es ${f.wd.every(Boolean) ? '' : `(${wdLabel()}) `}noch keine Abfragen.`, 'Keine Abfrage in diesem Zeitfenster.');
-        return;
-      }
-      let r;
-      switch (S.tab) {
-        case 'erreichbarkeit':
-          r = await rpc('reach', { F: f, dates, res: S.f.res, metric: S.f.reachMetric, R: S.f.R, classes: S.f.reachMetric === 'prob' ? probClasses() : distClasses() });
-          if (seq !== anSeq) return;
-          showRaster(r); renderReachOut(r);
-          if (r.sampled > r.polls) setStatus(`Grundlage: gleichmäßige Stichprobe von ${nf.format(r.polls)} aus ${basisText(r.sampled, r.days)}.`);
-          else statusOk(r.polls, r.days);
-          break;
-        case 'dichte':
-          r = await rpc('density', { F: f, dates, res: S.f.res, smooth: S.f.smooth, stops: toStops(R.heat.slice(1), 0.25, 0.9) });
-          if (seq !== anSeq) return;
-          showRaster(r); renderDensOut(r); statusOk(r.polls, r.days); break;
-        case 'nutzung':
-          r = await rpc('usage', { F: f, dates, P: tripParams() });
-          if (seq !== anSeq) return;
-          renderUsageOut(r);
-          if (!r.count) statusNone(`Keine Fahrten mit Start ${wholeDay() ? 'im Zeitraum' : `zwischen ${winLabel()} Uhr`} (${basisText(r.polls, r.days)}).`);
-          else statusOk(r.polls, r.days, `${plural(r.count, 'Fahrt', 'Fahrten')} im Zeitfenster`);
-          break;
-        case 'stroeme':
-          r = await rpc('flows', { F: f, dates, P: tripParams(), cell: S.f.cell, top: S.f.top, min: S.f.min });
-          if (seq !== anSeq) return;
-          renderFlowsOut(r);
-          if (!r.trips) statusNone(`Keine Fahrten mit Start ${wholeDay() ? 'im Zeitraum' : `zwischen ${winLabel()} Uhr`} (${basisText(r.polls, r.days)}).`);
-          else statusOk(r.polls, r.days, `${plural(r.trips, 'Fahrt', 'Fahrten')} im Zeitfenster`);
-          break;
-        case 'stationen':
-          r = await rpc('stations', { F: f, dates, k: S.f.k });
-          if (seq !== anSeq) return;
-          renderStationsOut(r); statusOk(r.polls, r.days); break;
-        default:
-      }
-      if (S.sel?.type === 'point') pointQuery(S.sel.lng, S.sel.lat, true);
-      if (S.sel?.type === 'station') stationQuery(S.sel.uid, true);
-    } catch (err) {
-      console.error(err);
-      if (seq === anSeq) { setStatus('<b>Die Auswertung ist fehlgeschlagen.</b>', 'none'); out().innerHTML = `<div class="empty">${esc(err.message.split('\n')[0])}</div>`; }
-    }
+      const r = S.o.metric === 'density'
+        ? await rpc('density', { F: b.F, dates: b.dates, res: S.o.res, smooth: Math.max(30, S.o.res * 2), stops: toStops(R.heat.slice(1), 0.25, 0.9), bb })
+        : await rpc('reach', { F: b.F, dates: b.dates, res: S.o.res, metric: S.o.metric, R: S.o.R, classes: S.o.metric === 'prob' ? probClasses() : distClasses(), bb });
+      if (seq !== ovSeq) return;
+      if (!r.polls) { clearRaster(); ovInfo = { err: `${b.label}: an diesen Tagen noch keine Abfragen.`, label: b.label }; }
+      else { showRaster(r); ovInfo = { polls: r.polls, days: r.days, sampled: r.sampled, vmax: r.vmax, label: b.label }; }
+    } catch (err) { console.error(err); ovInfo = { err: 'Die Berechnung ist fehlgeschlagen.' }; }
+    renderCtx();
+    if (S.sel?.type === 'point') pointQuery(S.sel.lng, S.sel.lat, true);
   }
 
   // the raster goes to the map as a PNG blob URL (encoded off the main thread by toBlob)
@@ -1557,123 +1342,42 @@
       rasterUrl = url;
     });
   }
-  function clearRaster() { rasterSeq++; map.getSource('raster')?.updateImage({ url: PIXEL }); }
-  const legendClear = () => { $('#aLegend').innerHTML = ''; refreshSheet(); };
+  function clearRaster() { rasterSeq++; ovKey = ''; map?.getSource('raster')?.updateImage({ url: PIXEL }); }
 
-  const legend = (cap, body) => { $('#aLegend').innerHTML = `<div class="top"><div class="cap">${cap}</div></div>${body}`; refreshSheet(); };
+  function availLegend() {
+    if (S.o.metric === 'prob') return { cap: `Chance auf ein Rad im Umkreis von ${S.o.R} m`, body: stepLegend(STEPS.slice().reverse(), PROB_CLASSES.map((c) => c[1])) };
+    if (S.o.metric === 'median') return { cap: 'Typischer Weg zum nächsten Rad (Luftlinie)', body: stepLegend(STEPS, DIST_CLASSES.map((c) => c[1]), DIST_CLASSES.map((c) => `~${c[2]} Min.`)) };
+    return { cap: 'Abgestellte Räder pro Hektar, im Schnitt', body: `<div class="bar" style="background:${gradient(R.heat.slice(1))}"></div><div class="scale"><span>wenige</span><span>${ovInfo?.vmax ? `${nf1.format(ovInfo.vmax)} pro ha` : 'viele'}</span></div>` };
+  }
+  function tripLegend() {
+    if (S.o.color === 'dir') return `<div class="grad"></div><div class="grad-scale"><span>Start</span><span>Ziel</span></div>`;
+    if (S.o.color === 'freq') return `<div class="bar" style="background:${gradient(R.freq)}"></div><div class="grad-scale"><span>1 Fahrt</span><span>${corrMax > 1 ? `${nf.format(corrMax)} Fahrten` : 'mehr'} pro Abschnitt</span></div>`;
+    return `<div class="durs">${DUR_LABELS.map((l, k) => `<div><i style="background:${C.dur[k]}"></i><span>${l}</span></div>`).join('')}</div>`;
+  }
+  const winText = () => (S.o.win >= 1440 ? '24 Std.' : S.o.win >= 60 ? `${S.o.win / 60} Std.` : `${S.o.win} Min.`);
 
-  function renderReachOut(r) {
-    if (S.f.reachMetric === 'prob') {
-      legend(`Chance auf ein Rad im Umkreis von ${S.f.R} m`, stepLegend(STEPS.slice().reverse(), PROB_CLASSES.map((c) => c[1])));
-    } else {
-      legend('Typischer Weg zum nächsten Rad (Luftlinie), bis …',
-        stepLegend(STEPS, DIST_CLASSES.map((c) => c[1]), DIST_CLASSES.map((c) => `~${c[2]} Min.`)) + '<p class="hint legend-note">Ohne Farbe: weiter als 1,2 km. Gehzeit bei Luftlinie, der echte Weg ist etwas länger.</p>');
+  // the line under the layer chips: what the map shows right now
+  function renderCtx() {
+    const el = $('#ctx'); if (!el) return;
+    const parts = [];
+    if (S.layers.trips && S.trips) {
+      const s = tripSum;
+      const bits = [`<b>${nf.format(s.arrived)}</b> angekommen`];
+      if (!S.k.isLive) bits.push(`<b>${nf.format(s.running)}</b> unterwegs`);
+      else if (S.o.away) bits.push(`<b>${nf.format(s.away)}</b> gerade losgefahren`);
+      parts.push(`<p class="line">Letzte ${winText()}: ${bits.join(', ')}. Heute bisher <b>${nf.format(s.today)}</b> Fahrten.</p><div class="legend">${tripLegend()}</div>`);
     }
-    $('#aOut').innerHTML = `<p class="hint">Tipp: irgendwo auf die Karte tippen. Dann wird für genau diesen Ort gerechnet, mit Tagesverlauf.</p>
-      ${S.me ? '<div class="actions"><button class="btn sm ghost" data-act="pointme" type="button">Meinen Standort auswerten</button></div>' : ''}`;
-  }
-
-  function renderDensOut(r) {
-    legend('Abgestellte Räder pro Hektar, im Schnitt', `<div class="bar" style="background:${gradient(R.heat.slice(1))}"></div><div class="scale"><span>wenige</span><span>${nf1.format(r.vmax)} pro ha</span></div>`);
-    $('#aOut').innerHTML = `<p class="hint">Tipp: auf die Karte tippen für den Tagesverlauf an diesem Ort.</p>`;
-  }
-
-  function renderUsageOut(r) {
-    const { t0, t1 } = winMin();
-    legend(`Fahrten mit Start ${winLabel() === 'ganzer Tag' ? 'über den ganzen Tag' : `${winLabel()} Uhr`}, ${wdLabel()}`, `<div class="tiles">
-      <div class="stat"><b>${r.perDay != null ? nf.format(Math.round(r.perDay)) : '–'}</b><span>pro Tag</span></div>
-      <div class="stat"><b>${r.medDur != null ? `${nf.format(Math.round(r.medDur))} min` : '–'}</b><span>Dauer, Median</span></div>
-      <div class="stat"><b>${r.medDist != null ? fmtDist(r.medDist) : '–'}</b><span>Strecke, Median</span></div></div>`);
-    const dur = r.durH, dist = r.distH;
-    $('#aOut').innerHTML = `${!r.count ? '<p class="hint">Im Zeitfenster wurde keine Fahrt erkannt. Die Tagesverläufe unten gelten trotzdem für alle Uhrzeiten.</p>' : ''}
-      <div class="block">${lineChart({ title: 'Räder unterwegs nach Uhrzeit', sub: 'Durchschnitt', series: [{ name: wdLabel(), color: C.trip, values: r.inuseH }], band: [t0, t1] })}</div>
-      <div class="block">${lineChart({ title: 'Fahrtbeginne pro Stunde', sub: 'Durchschnitt', series: [{ name: wdLabel(), color: C.trip, values: r.perHour }], band: [t0, t1] })}</div>
-      <div class="block">${timeChart({ title: 'Räder unterwegs im Zeitraum', t: r.series.t, values: r.series.inuse, color: C.trip })}</div>
-      <div class="block">${barChart({ title: 'Fahrtdauer', sub: `${nf.format(r.count - r.short)} mit messbarer Dauer`, values: dur,
-        labels: dur.map((_, k) => (k === dur.length - 1 ? 'über 2 Std.' : `${k * 5}–${k * 5 + 5} min`)), tickEvery: 6, tickLabel: (k) => (k === dur.length - 1 ? '' : `${k * 5}`), unitX: 'min' })}</div>
-      <div class="block">${barChart({ title: 'Strecke (Luftlinie)', sub: `${nf.format(r.count)} Fahrten`, values: dist,
-        labels: dist.map((_, k) => (k === dist.length - 1 ? 'über 8 km' : `${nf1.format(k * 0.25)}–${nf1.format(k * 0.25 + 0.25)} km`)), tickEvery: 4, tickLabel: (k) => (k === dist.length - 1 ? '' : nf1.format(k * 0.25)), unitX: 'km' })}</div>
-      <p class="hint">Nicht als Fahrt gezählt: ${nf.format(r.service)} Abwesenheiten über ${nf1.format(S.f.maxDurH)} Std., ${nf.format(r.round)} Rückkehren an denselben Ort${r.unclear ? ` und ${nf.format(r.unclear)} Bewegungen über eine Abfragelücke von mehr als einer Stunde (Zeitpunkt unklar)` : ''}.</p>`;
-  }
-
-  function nearestStationName(lng, lat) {
-    let best = null, bd = Infinity;
-    for (const s of S.live?.stations || []) { const d = hav(lat, lng, s.lat, s.lng); if (d < bd) { bd = d; best = s; } }
-    return best ? (bd > 600 ? `nahe ${best.name}` : best.name) : `${nf1.format(lat)}, ${nf1.format(lng)}`;
-  }
-
-  // ---- flows, with particles moving along the lines
-  let flowLines = [], partRaf = 0, partFrame = 0;
-  function renderFlowsOut(r) {
-    const max = Math.max(1, ...r.lines.map((l) => l[4]));
-    flowLines = r.lines.map(([x0, y0, x1, y1, c]) => ({ a: [x0, y0], b: [x1, y1], c, w: c / max, n: Math.max(1, Math.round((c / max) * 4)), seed: Math.random() }));
-    setData('flows', { type: 'FeatureCollection', features: flowLines.map((l) => ({
-      type: 'Feature', geometry: { type: 'LineString', coordinates: arcPath(l.a, l.b, 1, 20) }, properties: { w: l.w, c: l.c } })) });
-    const vmax = Math.max(1, ...r.cells.map((c) => c[2] + c[3]));
-    // circles use the same threshold as the lines, so both always appear together
-    setData('netc', { type: 'FeatureCollection', features: r.cells.filter((c) => c[2] + c[3] >= S.f.min).map(([x, y, s, e]) => ({
-      type: 'Feature', geometry: { type: 'Point', coordinates: [x, y] }, properties: { v: (e - s) / (e + s), n: e + s, s, e, rel: Math.sqrt((e + s) / vmax) } })) });
-    legend('Kreise: Bilanz je Bereich. Linien: häufigste Verbindungen, die Punkte zeigen die Richtung.',
-      `<div class="bar" style="background:${gradient([R.div.neg[0], R.div.neg[1], R.div.neg[2], R.div.mid, R.div.pos[0], R.div.pos[1], R.div.pos[2]])}"></div>
-      <div class="scale"><span>mehr Abfahrten</span><span>ausgeglichen</span><span>mehr Ankünfte</span></div>`);
-    if (!r.trips) { legendClear(); $('#aOut').innerHTML = emptyState('Keine Fahrten im Zeitfenster.'); stopParticles(); return; }
-    const top = r.lines.slice(0, 12);
-    $('#aOut').innerHTML = `<h2>Häufigste Verbindungen</h2>
-      ${top.length ? `<ul class="rows">${top.map(([x0, y0, x1, y1, c]) => `<li><span class="main"><b>${esc(nearestStationName(x0, y0))}</b><small>nach ${esc(nearestStationName(x1, y1))}, ${fmtDist(hav(y0, x0, y1, x1))}</small></span><span class="val">${nf.format(c)}<small>${c === 1 ? 'Fahrt' : 'Fahrten'}</small></span></li>`).join('')}</ul>`
-        : `<p class="hint">Keine Verbindung hat mindestens ${S.f.min} Fahrten. Unter „Filter“ die Mindestzahl senken.</p>`}`;
-    startParticles();
-  }
-  function startParticles() {
-    stopParticles();
-    if (REDUCED) { drawParticles(0.7, true); return; }
-    let last = performance.now(), acc = 0;
-    const tick = (ts) => {
-      acc += (ts - last) / 1000; last = ts;
-      if (S.mode === 'analyse' && S.tab === 'stroeme') { drawParticles(acc / 3.2); partRaf = requestAnimationFrame(tick); }
-    };
-    partRaf = requestAnimationFrame(tick);
-  }
-  function stopParticles() { cancelAnimationFrame(partRaf); partRaf = 0; if (styleReady) setData('particles', EMPTY); }
-  function drawParticles(phase, still) {
-    if (!still && partFrame++ % 2) return; // ~30 fps is plenty
-    const feats = [];
-    for (const l of flowLines) {
-      for (let k = 0; k < l.n; k++) {
-        const u = still ? phase : (phase + k / l.n + l.seed) % 1;
-        feats.push({ type: 'Feature', geometry: { type: 'Point', coordinates: arcPoint(l.a, l.b, u) }, properties: { o: Math.min(1, u * 4, (1 - u) * 6) } });
-      }
+    if (S.layers.avail) {
+      const o = ovInfo || {};
+      const lg = availLegend();
+      const basis = o.err ? `<span class="warn-t">${esc(o.err)}</span>`
+        : `${o.label || ''}, ${S.o.days} Tage, ${WD_LABEL[S.o.wd]}${o.polls ? ` · ${nf.format(o.polls)} Abfragen${o.sampled > o.polls ? ' (Stichprobe)' : ''}` : ''}`;
+      parts.push(`<div class="legend"><div class="top"><div class="cap">${lg.cap}</div>${o.busy ? '<span class="busy">rechnet</span>' : ''}</div>${lg.body}</div>
+        <div class="line hint-l">${basis}. Ort antippen für Details.</div>`);
     }
-    setData('particles', { type: 'FeatureCollection', features: feats });
-  }
-
-  function showNetCell(p, lngLat) {
-    showDetail('#detailA', `
-      <p class="kicker">Bereich bei ${esc(nearestStationName(lngLat[0], lngLat[1]))}</p>
-      <h3>${nf.format(p.s)} Abfahrten, ${nf.format(p.e)} Ankünfte</h3>
-      <p class="hint">${wdLabel()}, ${winLabel()}, ${rangeLabel()}. ${p.e > p.s ? 'Hier sammeln sich Räder an.' : p.e < p.s ? 'Von hier fahren mehr Räder weg als ankommen.' : 'Ausgeglichen.'}</p>`);
-    select({ type: 'Point', coordinates: lngLat });
-  }
-
-  // ---- stations
-  function renderStationsOut(r) {
-    S.stList = r.list;
-    const rows = r.list.filter((s) => s.p != null);
-    const amax = Math.max(1, ...rows.map((s) => s.avg));
-    setData('anst', { type: 'FeatureCollection', features: rows.map((s) => ({
-      type: 'Feature', geometry: { type: 'Point', coordinates: [s.lng, s.lat] }, properties: { uid: s.uid, p: s.p, a: s.avg, r: s.avg / amax } })) });
-    const empty = S.f.stMetric === 'empty';
-    map.setPaintProperty('an-st', 'circle-color', empty
-      ? ['interpolate', ['linear'], ['get', 'p'], 0, R.red[0], 33, R.red[1], 66, R.red[2], 100, R.red[3]]
-      : ['interpolate', ['linear'], ['get', 'r'], 0, R.blue[0], 0.33, R.blue[1], 0.66, R.blue[2], 1, R.blue[3]]);
-    if (empty) legend(`Chance, dass die Station ${S.f.k ? `höchstens ${S.f.k} ${S.f.k === 1 ? 'Rad' : 'Räder'} hat` : 'leer ist'}`, `<div class="bar" style="background:${gradient(R.red)}"></div><div class="scale"><span>nie</span><span>50 %</span><span>immer</span></div>`);
-    else legend('Durchschnittliche Zahl Räder an der Station', `<div class="bar" style="background:${gradient(R.blue)}"></div><div class="scale"><span>0</span><span>${nf1.format(amax / 2)}</span><span>${nf1.format(amax)}</span></div>`);
-    if (!rows.length) { legendClear(); $('#aOut').innerHTML = emptyState('Keine Abfrage passt zum Filter.'); return; }
-    const emp = rows.slice().sort((x, y) => y.p - x.p || x.avg - y.avg).slice(0, 8);
-    const full = rows.slice().sort((x, y) => y.avg - x.avg).slice(0, 6);
-    const kl = S.f.k ? 'fast leer' : 'leer';
-    const li = (s, v, sub) => `<li><button class="rowbtn" data-act="stq" data-id="${esc(s.uid)}"><span class="main"><b>${esc(s.name)}</b><small>${sub}</small></span><span class="val">${v}</span></button></li>`;
-    $('#aOut').innerHTML = `<h2>Am häufigsten ${kl}</h2><ul class="rows">${emp.map((s) => li(s, `${Math.round(s.p)} %<small>der Zeit ${kl}</small>`, `im Schnitt ${nf1.format(s.avg)} Räder`)).join('')}</ul>
-      <h2 class="spaced">Meist gut gefüllt</h2><ul class="rows">${full.map((s) => li(s, `${nf1.format(s.avg)}<small>Räder im Schnitt</small>`, `${Math.round(s.p)} % der Zeit ${kl}`)).join('')}</ul>`;
+    el.innerHTML = parts.join('');
+    const tl = $('#tripLegend'); if (tl) tl.innerHTML = tripLegend();
+    refreshSheet();
   }
 
   // ---- point and station queries
@@ -1685,86 +1389,84 @@
     }
     return { type: 'Feature', geometry: { type: 'Polygon', coordinates: [pts] }, properties: {} };
   }
+  function nearestStationName(lng, lat) {
+    let best = null, bd = Infinity;
+    for (const s of S.live?.stations || []) { const d = hav(lat, lng, s.lat, s.lng); if (d < bd) { bd = d; best = s; } }
+    return best ? (bd > 600 ? `nahe ${best.name}` : best.name) : `${nf1.format(lat)}, ${nf1.format(lng)}`;
+  }
 
   async function pointQuery(lng, lat, quiet) {
     S.sel = { type: 'point', lng, lat };
-    const Rq = S.tab === 'dichte' ? 150 : S.f.reachMetric === 'prob' ? S.f.R : 200;
+    const Rq = S.o.R;
     setData('qpt', { type: 'FeatureCollection', features: [circle([lng, lat], Rq), { type: 'Feature', geometry: { type: 'Point', coordinates: [lng, lat] }, properties: {} }] });
     applyVisibility();
-    if (!quiet) showDetail('#detailA', '<p class="kicker">Ausgewählter Ort</p><h3>…</h3><span class="busy">rechnet</span>', { keepSel: true });
-    const { dates } = filterDates();
-    if (!dates.length) return;
-    const r = await rpc('point', { F: F(), dates, lat, lng, R: Rq });
+    if (!quiet) showDetail('#detail', '<p class="kicker">Ausgewählter Ort</p><h3>…</h3><span class="busy">rechnet</span>', { keepSel: true });
+    try { await ensureIndex(); } catch { return; }
+    const b = availBasis();
+    if (!b.dates.length) return;
+    const r = await rpc('point', { F: b.F, dates: b.dates, lat, lng, R: Rq });
     if (S.sel?.type !== 'point' || S.sel.lng !== lng) return;
-    const dens = S.tab === 'dichte', w = r.win;
-    let head, sub;
-    if (!w) { head = 'keine Daten'; sub = 'Keine Abfrage passt zum Filter'; }
-    else if (dens) { head = `${nf1.format(w.avg)} Räder`; sub = `stehen im Schnitt im Umkreis von ${Rq} m (${wdLabel()}, ${winLabel()})`; }
-    else if (S.f.reachMetric === 'prob') { head = `${Math.round(w.pct)} %`; sub = `Chance auf mindestens ein Rad im Umkreis von ${Rq} m (${wdLabel()}, ${winLabel()})`; }
-    else { head = r.nearestMedian != null ? fmtDist(r.nearestMedian) : '–'; sub = `typischer Weg zum nächsten Rad, Luftlinie (${wdLabel()}, ${winLabel()})`; }
-    const vals = (o) => (dens ? o.avg : o.pct);
-    showDetail('#detailA', `
+    const w = r.win, ha = (Math.PI * Rq * Rq) / 10000;
+    const chance = w ? `${Math.round(w.pct)} %` : '–', walk = r.nearestMedian != null ? fmtDist(r.nearestMedian) : '–', dens = w ? `${nf1.format(w.avg / ha)} pro ha` : '–';
+    const head = { prob: chance, median: walk, density: dens }[S.o.metric];
+    const sub = { prob: `Chance auf ein Rad im Umkreis von ${Rq} m`, median: 'typischer Weg zum nächsten Rad (Luftlinie)', density: `Räder pro Hektar (im Umkreis von ${Rq} m)` }[S.o.metric];
+    const densMode = S.o.metric === 'density';
+    const vals = (o) => (densMode ? o.avg.map((v) => (v == null ? null : v / ha)) : o.pct);
+    showDetail('#detail', `
       <p class="kicker">${esc(nearestStationName(lng, lat))}</p>
       <h3>${head}</h3>
-      <p class="hint">${sub}.${w ? ` Grundlage: ${nf.format(w.n)} Abfragen.` : ''}</p>
-      ${w && !dens ? `<dl class="kv"><dt>Rad im Umkreis ${Rq} m</dt><dd>${Math.round(w.pct)} % der Zeit</dd><dt>Räder im Umkreis</dt><dd>${nf1.format(w.avg)} im Schnitt</dd></dl>` : ''}
-      ${lineChart({ title: dens ? `Räder im Umkreis von ${Rq} m` : `Chance auf ein Rad im Umkreis von ${Rq} m`, sub: 'über den Tag', unit: dens ? '' : '%', yMax: dens ? null : 100,
-        series: [{ name: wdLabel(), color: C.wd, values: vals(r.sel) }, ...(wdLabel() !== 'alle Tage' ? [{ name: 'alle Tage', color: C.muted, values: vals(r.all) }] : [])],
-        band: [winMin().t0, winMin().t1] })}
+      <p class="hint">${sub}, ${b.label}, letzte ${S.o.days} Tage, ${WD_LABEL[S.o.wd]}.${w ? ` Grundlage: ${nf.format(w.n)} Abfragen.` : ' Keine Abfrage in diesem Zeitfenster.'}</p>
+      ${w ? `<dl class="kv"><dt>Chance im Umkreis ${Rq} m</dt><dd>${chance}</dd><dt>Laufweg (Median)</dt><dd>${walk}</dd><dt>Räder pro Hektar</dt><dd>${dens}</dd></dl>` : ''}
+      ${lineChart({ title: densMode ? 'Räder pro Hektar' : `Chance auf ein Rad im Umkreis von ${Rq} m`, sub: 'über den Tag', unit: densMode ? '' : '%', yMax: densMode ? null : 100,
+        series: [{ name: WD_LABEL[S.o.wd], color: C.wd, values: vals(r.sel) }, ...(S.o.wd !== 'all' ? [{ name: 'alle Tage', color: C.muted, values: vals(r.all) }] : [])],
+        band: [b.F.t0, b.F.t1] })}
       <div class="actions"><button class="btn sm ghost" data-act="clearpoint">Auswahl aufheben</button></div>`, { keepSel: true, quiet });
   }
 
-  async function stationQuery(uid, quiet, target = '#detailA') {
-    if (target === '#detailA') S.sel = { type: 'station', uid };
+  async function stationQuery(uid, target) {
     await ensureIndex();
-    const { dates } = filterDates();
-    const k = S.f.k;
-    const r = await rpc('stationProfile', { F: F(), dates, uid: String(uid), k });
-    const el = target === '#detailA' ? null : $(target);
-    if (!r) { if (el) el.innerHTML = '<p class="hint">Für diese Station gibt es noch keine Auswertung.</p>'; return; }
-    const multi = wdLabel() !== 'alle Tage';
-    const band = target === '#detailA' ? [winMin().t0, winMin().t1] : null;
-    const charts = `${lineChart({ title: 'Räder im Tagesverlauf', sub: 'Durchschnitt', series: [{ name: wdLabel(), color: C.wd, values: r.sel.avg }, ...(multi ? [{ name: 'alle Tage', color: C.muted, values: r.all.avg }] : [])], band })}
-      ${lineChart({ title: k ? `Chance auf höchstens ${k} ${k === 1 ? 'Rad' : 'Räder'}` : 'Chance, dass sie leer ist', unit: '%', yMax: 100, series: [{ name: wdLabel(), color: C.wd, values: r.sel.p }, ...(multi ? [{ name: 'alle Tage', color: C.muted, values: r.all.p }] : [])], band })}
-      <p class="hint">${wdLabel()}, ${rangeLabel()}.</p>`;
-    if (el) { el.innerHTML = charts; bindCharts(el); return; }
-    if (S.sel?.type !== 'station' || S.sel.uid !== uid) return;
-    const s = S.stList?.find((x) => x.uid === uid);
-    showDetail('#detailA', `
-      <p class="kicker"><span class="dot" style="background:${C.station}"></span>Station</p>
-      <h3>${esc(r.name)}</h3>
-      ${s && s.p != null ? `<p class="hint">${wdLabel()}, ${winLabel()}: im Schnitt ${nf1.format(s.avg)} Räder, ${Math.round(s.p)} % der Zeit ${k ? `höchstens ${k}` : 'leer'}.</p>` : ''}
-      ${charts}`, { keepSel: true, quiet });
-    select({ type: 'Point', coordinates: [r.lng, r.lat] });
-    if (!quiet) flyTo([r.lng, r.lat], 14);
+    const b = availBasis();
+    const r = await rpc('stationProfile', { F: { ...b.F, t0: 0, t1: 0 }, dates: b.dates, uid: String(uid), k: 0 });
+    const el = $(target); if (!el) return;
+    if (!r) { el.innerHTML = '<p class="hint">Für diese Station gibt es noch keine Auswertung.</p>'; return; }
+    const m = localMin(shownTime());
+    el.innerHTML = `${lineChart({ title: 'Räder im Tagesverlauf', sub: 'Durchschnitt', series: [{ name: WD_LABEL[S.o.wd], color: C.wd, values: r.sel.avg }], band: [m, Math.min(1439, m + 15)] })}
+      ${lineChart({ title: 'Chance, dass sie leer ist', unit: '%', yMax: 100, series: [{ name: WD_LABEL[S.o.wd], color: C.wd, values: r.sel.p }], band: [m, Math.min(1439, m + 15)] })}
+      <p class="hint">Letzte ${S.o.days} Tage, ${WD_LABEL[S.o.wd]} (einstellbar unter Verfügbarkeit).</p>`;
+    bindCharts(el);
   }
 
-  // ---- idle time on a continuous scale, minutes to days
+  // ================================================================ statistics (lazy: only while opened)
   const IDLE_TICKS = [[3600, '1 Std.'], [6 * 3600, '6 Std.'], [86400, '1 Tag'], [3 * 86400, '3 Tage']];
   const idleL = (s) => Math.min(1, Math.max(0, Math.log(Math.max(s, 600) / 600) / Math.log((14 * 86400) / 600)));
-  function renderIdle() {
-    if (!S.live || S.mode !== 'analyse' || S.tab !== 'standzeit') return;
-    const t = now();
-    const kindOk = (b) => S.f.kind === 'all' || (S.f.kind === 'free' ? b.kind !== 'station' : b.kind === 'station');
-    const all = S.live.bikes.filter((b) => b.since && kindOk(b)).map((b) => ({ b, s: Math.max(0, t - b.since) }));
-    const shown = all.filter((x) => x.s >= S.f.idleMin);
-    setData('idle', { type: 'FeatureCollection', features: shown.map(({ b, s }) => ({
-      type: 'Feature', geometry: { type: 'Point', coordinates: [b.lng, b.lat] }, properties: { l: idleL(s), id: b.bike } })) });
-    legend('Unbewegt seit', `<div class="bar" style="background:${gradient(R.idle)}"></div>
-      <div class="scale log"><span style="left:0">10 Min.</span>${IDLE_TICKS.map(([s, l]) => `<span style="left:${idleL(s) * 100}%">${l}</span>`).join('')}<span style="left:100%">14 Tage</span></div>`);
-    const out = $('#aOut'); if (!out) return;
-    if (!all.length) { out.innerHTML = '<div class="empty">Keine Standzeiten verfügbar.</div>'; return; }
-    const censored = all.filter((x) => x.b.since_censored).length;
-    const longest = shown.slice().sort((a, b) => b.s - a.s).slice(0, 20);
-    out.innerHTML = `${survivalChart(all.map((x) => x.s))}
-      ${censored > all.length * 0.3 ? `<p class="basis warn">Die Aufzeichnung läuft erst seit kurzem. ${nf.format(censored)} Räder stehen seit Beginn unbewegt; ihre echte Standzeit ist länger.</p>` : ''}
-      <h2 class="spaced">Am längsten unbewegt</h2><ul class="rows">${longest.map(({ b, s }) => {
-        const st = b.kind === 'station' ? S.live.stById.get(String(b.place_uid)) : null;
-        return `<li><button class="rowbtn" data-act="bike" data-id="${esc(b.bike)}"><span class="dot" style="background:${R.idle[Math.round(idleL(s) * 4)]}"></span>
-          <span class="main"><b>Rad ${esc(b.bike)}</b><small>${st ? esc(st.name) : 'frei abgestellt'}</small></span>
-          <span class="val">${b.since_censored ? 'mind. ' : ''}${fmtDur(s)}</span></button></li>`;
-      }).join('')}</ul>`;
-    bindCharts(out);
+  let statsSeq = 0;
+  async function renderStats() {
+    const box = $('#statsOut');
+    if (!box || !$('#statsBox').open) return;
+    box.innerHTML = '<span class="busy">rechnet</span>';
+    try { await ensureIndex(); } catch { box.innerHTML = '<p class="hint">Noch kein Verlauf vorhanden.</p>'; return; }
+    const to = lastDate(), from = addDays(to, -6);
+    const dates = tlIndex.map((d) => d.date).filter((d) => d >= from && d <= to);
+    const seq = ++statsSeq;
+    const r = await rpc('usage', { F: { from, to, wd: Array(7).fill(true), t0: 0, t1: 0, kind: 'all' }, dates, P: tripParams() });
+    if (seq !== statsSeq) return;
+    const dur = r.durH, dist = r.distH;
+    const idle = (S.live?.bikes || []).filter((b) => b.since).map((b) => Math.max(0, now() - b.since));
+    box.innerHTML = `<p class="hint">Letzte ${dates.length} ${dates.length === 1 ? 'Tag' : 'Tage'} (${fmtD(from)}–${fmtD(to)}), alle geschätzt.</p>
+      <div class="tiles">
+        <div class="stat"><b>${r.perDay != null ? nf.format(Math.round(r.perDay)) : '–'}</b><span>Fahrten pro Tag</span></div>
+        <div class="stat"><b>${r.medDur != null ? `${nf.format(Math.round(r.medDur))} min` : '–'}</b><span>Dauer, Median</span></div>
+        <div class="stat"><b>${r.medDist != null ? fmtDist(r.medDist) : '–'}</b><span>Strecke, Median</span></div></div>
+      ${lineChart({ title: 'Räder unterwegs nach Uhrzeit', sub: 'Durchschnitt', series: [{ name: 'alle Tage', color: C.trip, values: r.inuseH }] })}
+      ${lineChart({ title: 'Fahrtbeginne pro Stunde', sub: 'Durchschnitt', series: [{ name: 'alle Tage', color: C.trip, values: r.perHour }] })}
+      ${timeChart({ title: 'Räder unterwegs', t: r.series.t, values: r.series.inuse, color: C.trip })}
+      ${barChart({ title: 'Fahrtdauer', sub: `${nf.format(r.count - r.short)} mit messbarer Dauer`, values: dur,
+        labels: dur.map((_, k) => (k === dur.length - 1 ? 'über 2 Std.' : `${k * 5}–${k * 5 + 5} min`)), tickEvery: 6, tickLabel: (k) => (k === dur.length - 1 ? '' : `${k * 5}`), unitX: 'min' })}
+      ${barChart({ title: 'Strecke (Luftlinie)', sub: `${nf.format(r.count)} Fahrten`, values: dist,
+        labels: dist.map((_, k) => (k === dist.length - 1 ? 'über 8 km' : `${nf1.format(k * 0.25)}–${nf1.format(k * 0.25 + 0.25)} km`)), tickEvery: 4, tickLabel: (k) => (k === dist.length - 1 ? '' : nf1.format(k * 0.25)), unitX: 'km' })}
+      ${idle.length ? survivalChart(idle) : ''}
+      <p class="hint">Nicht als Fahrt gezählt: ${nf.format(r.service)} Abwesenheiten über ${nf1.format(S.o.maxDurH)} Std., ${nf.format(r.round)} Rückkehren an denselben Ort${r.unclear ? ` und ${nf.format(r.unclear)} Bewegungen über eine Abfragelücke von mehr als einer Stunde` : ''}.</p>`;
+    bindCharts(box);
   }
 
   // share of bikes untouched for at least x (log x axis, 10 min to 14 days)
@@ -1781,130 +1483,73 @@
     const xlab = `<text x="${L}" y="${H - 6}">10 Min.</text>` + IDLE_TICKS.map(([s, l]) => `<text x="${X(s)}" y="${H - 6}" text-anchor="middle">${l}</text>`).join('') + `<text x="${L + w}" y="${H - 6}" text-anchor="end">14 Tage</text>`;
     const id = `c${++chartSeq}`;
     chartData.set(id, { kind: 'surv', xs, share, X, L, w });
-    return `<div class="chart" data-chart="${id}"><div class="chart-title"><h2>Wie lange stehen die Räder schon?</h2><span>${nf.format(n)} Räder</span></div>
+    return `<div class="chart" data-chart="${id}"><div class="chart-title"><h2>Wie lange stehen die Räder schon?</h2><span>${nf.format(n)} Räder, jetzt</span></div>
       <p class="hint chart-note">Anteil der Räder, die mindestens so lange unbewegt sind</p>
       <svg viewBox="0 0 ${CW} ${H}" role="img" aria-label="Verteilung der Standzeiten"><g class="grid">${grid}</g><g class="axis">${ylab}${xlab}</g>
-      <path d="${d}" fill="none" stroke="${R.idle[3]}" stroke-width="2" stroke-linejoin="round"/>
+      <path d="${d}" fill="none" stroke="${C.trip}" stroke-width="2" stroke-linejoin="round"/>
       <line class="xh" x1="0" x2="0" y1="${T}" y2="${T + h}" stroke="${C.muted}" stroke-width="1" visibility="hidden"/>
       <rect class="hit" x="${L}" y="${T}" width="${w}" height="${h}"/></svg></div>`;
   }
 
-  // ---- time window: one slider, two handles, never crossing, at least 15 min
-  function setWindow(a, b, delay = 180) {
-    a = Math.max(0, Math.min(95, Math.round(a))); b = Math.max(a + 1, Math.min(96, Math.round(b)));
-    if (a === S.f.a && b === S.f.b) return;
-    S.f.a = a; S.f.b = b;
-    stopWindowPlay(); syncFilterUI(); saveFilter(); scheduleCompute(delay);
-    $$('#filters [data-win]').forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.win === `${a},${b}`)));
+  // ================================================================ settings
+  const FMT = { minGone: (v) => `${v} m`, jump: (v) => `${v} m`, maxDurH: (v) => `${nf1.format(v)} Std.` };
+  function slider(id, label, min, max, step, val, fmt) {
+    return `<div class="row"><h3><label for="${id}">${label}</label><output id="${id}-o">${fmt(val)}</output></h3>
+      <input class="slider" type="range" id="${id}" min="${min}" max="${max}" step="${step}" value="${val}" data-param="${id.replace('p-', '')}"></div>`;
   }
-  function setupDual() {
-    const el = $('#wDual'), A = $('#wA'), B = $('#wB');
-    const geo = () => { const r = el.getBoundingClientRect(); return { x0: r.left + 12, w: Math.max(1, r.width - 24) }; };
-    const pos = (x) => { const g = geo(); return ((x - g.x0) / g.w) * 96; };
-    let drag = null;
-    el.addEventListener('pointerdown', (e) => {
-      if (e.button > 0) return;
-      const u = pos(e.clientX), { a, b } = S.f, px = geo().w / 96;
-      const da = Math.abs(u - a) * px, db = Math.abs(u - b) * px;
-      // narrow window (thinner than a finger): pressing on it moves it, pressing
-      // beside it pulls the nearer edge there. Wide window: the ends are handles,
-      // the middle moves the whole window.
-      let mode;
-      const wpx = (b - a) * px;
-      if (wpx < 34 && !wholeDay()) mode = u >= a - 8 / px && u <= b + 8 / px ? 'move' : u < a ? 'a' : 'b';
-      else if (da <= 16 && da <= db) mode = 'a';
-      else if (db <= 16) mode = 'b';
-      else if (u > a && u < b && !wholeDay()) mode = 'move';
-      else if (u > a && u < b) mode = u - a < b - u ? 'a' : 'b';
-      else mode = u < a ? 'a' : 'b';
-      drag = { mode, u0: u, a0: a, b0: b, id: e.pointerId };
-      try { el.setPointerCapture(e.pointerId); } catch { /* ignore */ }
-      el.classList.add('dragging');
-      (mode === 'b' ? B : A).focus({ preventScroll: true });
-      if (mode !== 'move') moveTo(e.clientX);
-      e.preventDefault();
-    });
-    const moveTo = (x) => {
-      const u = pos(x);
-      if (drag.mode === 'a') setWindow(Math.min(Math.round(u), S.f.b - 1), S.f.b);
-      else if (drag.mode === 'b') setWindow(S.f.a, Math.max(Math.round(u), S.f.a + 1));
-      else {
-        const w = drag.b0 - drag.a0, a = Math.max(0, Math.min(96 - w, drag.a0 + Math.round(u - drag.u0)));
-        setWindow(a, a + w);
-      }
-    };
-    el.addEventListener('pointermove', (e) => { if (drag && e.pointerId === drag.id) moveTo(e.clientX); });
-    const end = (e) => { if (drag && e.pointerId === drag.id) { drag = null; el.classList.remove('dragging'); } };
-    el.addEventListener('pointerup', end);
-    el.addEventListener('pointercancel', end);
-    // keyboard (arrow keys on the focused handle): same rules
-    A.addEventListener('input', () => { setWindow(Math.min(+A.value, S.f.b - 1), S.f.b); A.value = S.f.a; });
-    B.addEventListener('input', () => { setWindow(S.f.a, Math.max(+B.value, S.f.a + 1)); B.value = S.f.b; });
-  }
-
-  // ---- filter inputs
-  let wTimer = 0;
-  function stopWindowPlay() { S.wPlaying = false; clearInterval(wTimer); $('#wPlay').classList.remove('on'); }
-  function startWindowPlay() {
-    S.wPlaying = true; $('#wPlay').classList.add('on');
-    clearInterval(wTimer);
-    if (wholeDay()) { S.f.a = 0; S.f.b = 4; syncFilterUI(); scheduleCompute(0); }
-    wTimer = setInterval(() => {
-      const w = S.f.b - S.f.a;
-      // one hour forward; at the end of the day start again at 00:00
-      if (S.f.b >= 96) S.f.a = 0; else S.f.a = Math.min(S.f.a + 4, 96 - w);
-      S.f.b = S.f.a + w;
-      syncFilterUI(); saveFilter(); scheduleCompute(0);
-    }, 1600);
-  }
-
-  function bindFilterInputs() {
-    const root = $('#filters');
-    if (!root) return;
-    root.querySelectorAll('input[data-param]').forEach((inp) => {
+  function renderTripParams() {
+    const o = S.o;
+    $('#tripParamsOut').innerHTML = `<div class="filters">
+      ${slider('p-minGone', 'Rad verschwindet und taucht mindestens so weit entfernt wieder auf', 50, 1000, 50, o.minGone, FMT.minGone)}
+      ${slider('p-jump', 'oder springt zwischen zwei Abfragen weiter als', 100, 2000, 100, o.jump, FMT.jump)}
+      ${slider('p-maxDurH', 'Länger weg = Werkstatt oder Umverteilung', 0.5, 12, 0.5, o.maxDurH, FMT.maxDurH)}</div>
+      <p class="hint">Bewegungen über eine Abfragelücke von mehr als einer Stunde werden nie gezählt, weil der Zeitpunkt unklar ist.</p>`;
+    let t = 0;
+    $$('#tripParamsOut input[data-param]').forEach((inp) => inp.addEventListener('input', () => {
       const k = inp.dataset.param;
-      inp.addEventListener('input', () => {
-        S.f[k] = +inp.value;
-        $(`#${inp.id}-o`).textContent = FMT[k](inp.value);
-        syncFilterUI(); saveFilter();
-        scheduleCompute(200);
-      });
+      S.o[k] = +inp.value; saveO();
+      $(`#${inp.id}-o`).textContent = FMT[k](inp.value);
+      clearTimeout(t);
+      t = setTimeout(() => { if (S.tl) loadTrips(S.tl); renderStats(); }, 350);
+    }));
+  }
+  function syncSettings() {
+    for (const g of $$('[data-set]')) {
+      const k = g.dataset.set;
+      if (k === 'R') {
+        g.innerHTML = R_OPTS.map((r) => `<button class="chip${S.o.R === r ? ' on' : ''}" data-v="${r}" aria-pressed="${S.o.R === r}">${r} m</button>`).join('');
+        continue;
+      }
+      for (const b of $$('button', g)) b.setAttribute('aria-checked', String(String(S.o[k]) === b.dataset.v));
+    }
+    $('#setAway').checked = !!S.o.away;
+    $('#rowR').hidden = S.o.metric === 'median';
+    $('#resHint').textContent = S.o.res < 25 ? '10 m rechnet nur den sichtbaren Ausschnitt und weniger Abfragen; genauer als etwa 25 m sind die Daten nicht.' : '';
+    renderCtx();
+  }
+  function bindSettings() {
+    $('#more').addEventListener('click', (e) => {
+      const b = e.target.closest('[data-set] button'); if (!b) return;
+      const k = b.closest('[data-set]').dataset.set, v = b.dataset.v;
+      S.o[k] = ['win', 'R', 'res', 'days'].includes(k) ? +v : v;
+      saveO(); syncSettings();
+      if (k === 'win') { renderTrips(S.k.clock); scheduleOverlay(0); }
+      else if (k === 'color') { applyVisibility(); renderTrips(S.k.clock); }
+      else { if (!S.layers.avail) setLayer('avail', true); else computeOverlay(true); }
     });
-    $('#p-idle')?.addEventListener('input', (e) => {
-      S.f.idleMin = IDLE_STEPS[+e.target.value];
-      $('#p-idle-o').textContent = idleLabel(S.f.idleMin);
-      saveFilter(); renderIdle();
-    });
-    root.querySelectorAll('[data-seg]').forEach((sg) => sg.addEventListener('click', (e) => {
-      const b = e.target.closest('button'); if (!b) return;
-      const k = sg.dataset.seg, v = b.dataset.v;
-      S.f[k] = (k === 'range' && v !== 'all') || k === 'res' || k === 'R' ? +v : v;
-      saveFilter();
-      if (k === 'reachMetric' || k === 'R') { const y = $('#scroll').scrollTop; enterAnalysis().then(() => { $('#scroll').scrollTop = y; }); return; }
-      sg.querySelectorAll('button').forEach((x) => x.setAttribute('aria-checked', String(x === b)));
-      if (k === 'range') { const { from, to } = filterDates(); $('#fFrom').value = from; $('#fTo').value = to; }
-      syncFilterUI();
-      if (S.tab === 'standzeit') renderIdle(); else scheduleCompute(0);
-    }));
-    for (const id of ['#fFrom', '#fTo']) $(id)?.addEventListener('change', () => {
-      S.f.range = 'custom'; S.f.from = $('#fFrom').value; S.f.to = $('#fTo').value;
-      root.querySelectorAll('[data-seg="range"] button').forEach((x) => x.setAttribute('aria-checked', 'false'));
-      syncFilterUI(); saveFilter(); scheduleCompute(0);
-    });
-    root.querySelectorAll('[data-wd]').forEach((b) => b.addEventListener('click', () => {
-      const i = +b.dataset.wd; S.f.wd[i] = S.f.wd[i] ? 0 : 1;
-      b.setAttribute('aria-pressed', String(!!S.f.wd[i]));
-      syncFilterUI(); saveFilter(); scheduleCompute(250);
-    }));
-    root.querySelectorAll('[data-wdp]').forEach((b) => b.addEventListener('click', () => {
-      S.f.wd = b.dataset.wdp.split('').map(Number);
-      root.querySelectorAll('[data-wd]').forEach((x) => x.setAttribute('aria-pressed', String(!!S.f.wd[+x.dataset.wd])));
-      syncFilterUI(); saveFilter(); scheduleCompute(0);
-    }));
-    root.querySelectorAll('[data-win]').forEach((b) => b.addEventListener('click', () => {
-      const [a, c] = b.dataset.win.split(',').map(Number);
-      setWindow(a, c, 0);
-    }));
+    $('#setAway').addEventListener('change', (e) => { S.o.away = e.target.checked; saveO(); renderTrips(S.k.clock); });
+    $('#statsBox').addEventListener('toggle', () => { if ($('#statsBox').open) renderStats(); });
+    $('#tripParams').addEventListener('toggle', () => { if ($('#tripParams').open) renderTripParams(); });
+  }
+  function setLayer(k, on) {
+    S.layers[k] = on;
+    const c = $(`#layers [data-layer="${k}"]`);
+    if (c) { c.classList.toggle('on', on); c.setAttribute('aria-pressed', String(on)); }
+    if (k === 'avail') {
+      if (on) computeOverlay(true);
+      else { clearRaster(); ovInfo = null; S.sel = S.sel?.type === 'point' ? null : S.sel; setData('qpt', EMPTY); }
+    }
+    applyVisibility(); renderTrips(S.k.clock); renderCtx();
   }
 
   // ================================================================ detail card
@@ -2096,17 +1741,7 @@
   }
 
   function bindUI() {
-    $$('.modes button').forEach((b) => b.addEventListener('click', () => setMode(b.dataset.mode)));
-    $$('#aTabs button').forEach((b) => b.addEventListener('click', () => {
-      S.tab = b.dataset.tab; closeDetail(true); setData('qpt', EMPTY); updateHash(); enterAnalysis();
-      b.scrollIntoView({ inline: 'nearest', block: 'nearest', behavior: REDUCED ? 'auto' : 'smooth' });
-    }));
-    $$('#layers .chip').forEach((c) => c.addEventListener('click', () => {
-      const k = c.dataset.layer, on = !S.layers[k];
-      S.layers[k] = on;
-      c.classList.toggle('on', on); c.setAttribute('aria-pressed', String(on));
-      applyVisibility(); renderKarte();
-    }));
+    $$('#layers .chip').forEach((c) => c.addEventListener('click', () => setLayer(c.dataset.layer, !S.layers[c.dataset.layer])));
     $('#searchForm').addEventListener('submit', (e) => {
       e.preventDefault();
       const q = $('#searchInput').value.trim();
@@ -2120,10 +1755,8 @@
     $('#btnLocate').addEventListener('click', () => locate(true));
     $('#btnHome').addEventListener('click', () => map.fitBounds(KOELN, { padding: isDesktop() ? { left: 440, top: 40, right: 40, bottom: 40 } : { top: 40, left: 20, right: 20, bottom: sheetVisibleHeight() + 10 }, duration: REDUCED ? 0 : 600 }));
     $('#repoLink').href = S.cfg?.repo || '#';
-    const tabs = $('#aTabs');
-    const tabEnd = () => tabs.classList.toggle('at-end', tabs.scrollLeft + tabs.clientWidth >= tabs.scrollWidth - 4);
-    tabs.addEventListener('scroll', tabEnd, { passive: true }); addEventListener('resize', tabEnd); setTimeout(tabEnd, 500);
     $('#scroll').addEventListener('scroll', (e) => e.target.classList.toggle('scrolled', e.target.scrollTop > 2), { passive: true });
+    bindSettings();
 
     // timeline
     $('#tlRange').addEventListener('input', (e) => { stopPlay(); setFrame(+e.target.value); });
@@ -2140,7 +1773,7 @@
     }));
     $('#tlEnd').addEventListener('change', (e) => { S.k.end = e.target.value || null; reloadTimeline(); });
     addEventListener('keydown', (e) => {
-      if (S.mode !== 'karte' || !S.tl) return;
+      if (!S.tl) return;
       const ae = document.activeElement;
       if (/input|textarea|select/i.test(ae?.tagName) && ae.type !== 'range') return;
       if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && ae?.id !== 'tlRange') {
@@ -2150,10 +1783,6 @@
         r.value = nx; stopPlay(); setFrame(nx); e.preventDefault();
       } else if (e.key === ' ' && ae === document.body) { if (S.k.playing) stopPlay(); else startPlay(); e.preventDefault(); }
     });
-
-    // analysis time window
-    setupDual();
-    $('#wPlay').addEventListener('click', () => (S.wPlaying ? stopWindowPlay() : startWindowPlay()));
 
     // delegated actions
     $('#panel').addEventListener('click', (e) => {
@@ -2166,9 +1795,9 @@
         setSheet(open ? 'full' : 'peek');
         if (!open) $('#scroll').scrollTo({ top: 0 });
       }
-      else if (a === 'bike') { if (S.mode === 'karte' && !S.k.isLive) goLive(); showBike(id); }
+      else if (a === 'bike') { if (!S.k.isLive) goLive(); showBike(id); }
       else if (a === 'station') showStation(id);
-      else if (a === 'trail') showTrailFor(id);
+      else if (a === 'trail') showBikeHistory(id);
       else if (a === 'tlbike') { const i = S.tl.bikeIndex.get(id); if (i != null) showTlBike(i); }
       else if (a === 'livebike') { goLive(); showBike(id); }
       else if (a === 'cleartrail') { S.hist = null; S.histWant = null; setData('hist', EMPTY); applyVisibility(); closeDetail(); }
@@ -2182,24 +1811,14 @@
         S.hp = { h: S.hp.h, from: Math.max(f, t - maxS), to: t }; reloadHist();
       }
       else if (a === 'frame') { const i = nearestFrame(+el.dataset.t); $('#tlRange').value = i; setFrame(i); }
-      else if (a === 'stq') stationQuery(id);
       else if (a === 'pointme' && S.me) {
-        S.tab = 'erreichbarkeit';
-        if (S.mode !== 'analyse') setMode('analyse'); else enterAnalysis();
+        if (!S.layers.avail) setLayer('avail', true);
         setTimeout(() => { pointQuery(S.me[0], S.me[1]); flyTo(S.me, 14.5); }, 60);
       }
       else if (a === 'clearpoint') { S.sel = null; setData('qpt', EMPTY); applyVisibility(); closeDetail(); }
-      else if (a === 'widen') {
-        const w = el.dataset.w;
-        if (w === 'day') { S.f.a = 0; S.f.b = 96; stopWindowPlay(); }
-        else if (w === 'wd') S.f.wd = [1, 1, 1, 1, 1, 1, 1];
-        else if (w === 'range') S.f.range = 'all';
-        saveFilter(); enterAnalysis();
-      }
     });
     $('#near').addEventListener('click', (e) => { if (e.target.id === 'btnNear2') locate(false); });
 
-    addEventListener('hashchange', () => { const m = S.mode, t = S.tab; readHash(); if (m !== S.mode) setMode(S.mode); else if (t !== S.tab) enterAnalysis(); });
     setInterval(updateStatus, 30000);
     // look for new data every minute while the page is visible, and right away when you come back
     setInterval(() => { if (document.visibilityState === 'visible') checkUpdate(false); }, 60000);
@@ -2226,25 +1845,28 @@
     await liveReady;
     const bb = S.live?.meta?.bounds;
     const view = bb ? [[bb[1], bb[0]], [bb[3], bb[2]]] : KOELN;
-    setMode(S.mode, { sheet: 'peek' });
-    requestAnimationFrame(() => map.fitBounds(view, { duration: 0, padding: isDesktop()
-      ? { left: 440, top: 30, right: 30, bottom: 30 } : { top: 20, left: 12, right: 12, bottom: sheetVisibleHeight() + 8 } }));
+    for (const [k, on] of Object.entries(S.layers)) { const c = $(`#layers [data-layer="${k}"]`); if (c) { c.classList.toggle('on', on); c.setAttribute('aria-pressed', String(on)); } }
+    applyVisibility(); renderKarte(true); syncSettings(); updateStatus();
+    requestAnimationFrame(() => {
+      setSheet('peek');
+      map.fitBounds(view, { duration: 0, padding: isDesktop()
+        ? { left: 440, top: 30, right: 30, bottom: 30 } : { top: 20, left: 12, right: 12, bottom: sheetVisibleHeight() + 8 } });
+    });
     reloadTimeline();
+    if (S.layers.avail) computeOverlay(true);
   }
 
   async function start() {
-    readHash();
-    S.f = loadFilter();
     try { S.cfg = await getJSON('config.json'); } catch { S.cfg = { style_light: 'https://tiles.openfreemap.org/styles/positron', style_dark: 'https://tiles.openfreemap.org/styles/dark' }; }
+    if (/^#(analyse|karte)/.test(location.hash)) history.replaceState(null, '', location.pathname); // old links
     bindUI();
     initSheet();
-    for (const s of $$('section.mode')) s.hidden = s.dataset.mode !== S.mode;
-    for (const b of $$('.modes button')) b.setAttribute('aria-selected', String(b.dataset.mode === S.mode));
+    syncSettings();
     liveReady = loadLive();
     if (typeof maplibregl === 'undefined') { toast('Die Kartenbibliothek konnte nicht geladen werden. Bitte Seite neu laden.', 10000); return; }
     initMap(S.cfg);
   }
   window.__app = S; Object.defineProperty(window, '__map', { get: () => map });
-  window.__ui = { setMode, setSheet, showStation, showBike, showTlStation, showBikeHistory, pointQuery, stationQuery, flyTo, setFrame, startPlay, stopPlay, goLive };
+  window.__ui = { setSheet, showStation, showBike, showTlStation, showBikeHistory, pointQuery, flyTo, setFrame, startPlay, stopPlay, goLive, setLayer, openTrip, computeOverlay };
   start();
 })();

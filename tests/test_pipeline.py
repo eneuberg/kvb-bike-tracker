@@ -182,3 +182,24 @@ def test_graph_is_published(tmp_path):
     assert (cfg.site_dir / "graph.bin.gz").read_bytes() == g.read_bytes()
     conf = json.loads((cfg.site_dir / "config.json").read_text())
     assert conf["graph"] and conf["trail_max_days"] == 3
+
+
+def test_incremental_export_keeps_older_days(tmp_path):
+    """Frequent exports only rewrite the last days; older day files and their
+    index entries stay as written by the last full export."""
+    from tests.simulate import simulate
+    from tracker import main as m
+
+    cfg = simulate(tmp_path / "hist", days=4, step_min=30)
+    cfg.site_dir = tmp_path / "site"
+    st = m.AnalysisState()
+    st.update(cfg, force=True)
+    tl = cfg.site_dir / "tl"
+    full = json.loads((tl / "index.json").read_text())
+    first = full["days"][0]["date"]
+    mtime = (tl / f"{first}.json").stat().st_mtime_ns
+    st.last_run = -1e18  # interval elapsed, but no full export due
+    st.update(cfg)
+    inc = json.loads((tl / "index.json").read_text())
+    assert [d["date"] for d in inc["days"]] == [d["date"] for d in full["days"]]
+    assert (tl / f"{first}.json").stat().st_mtime_ns == mtime

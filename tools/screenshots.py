@@ -24,33 +24,29 @@ MID_FRAME = """() => { const r = document.querySelector('#tlRange'); r.value = M
   r.dispatchEvent(new Event('input')); }"""
 HALF = "() => window.__ui.setSheet('half')"
 POINT = "() => window.__ui.pointQuery(6.9583, 50.9413)"
-FILTER_OPEN = "() => document.querySelector('.mode:not([hidden]) .more-toggle').click()"
+MORE_OPEN = "() => document.querySelector('.more-toggle').click()"
 PLAY = "() => { const T = window.__app.tl; if (T) { window.__ui.setFrame(Math.max(T.i0, T.t.length - 6)); window.__ui.startPlay(); } }"
-PREP = """() => { localStorage.setItem('kvb-filter-v4', JSON.stringify({ range: 'all', wd: [1,1,1,1,1,1,1], a: 0, b: 96 })); }"""
+AVAIL = "() => window.__ui.setLayer('avail', true)"
+FREQ = """() => { const b = document.querySelector('[data-set=\"color\"] [data-v=\"freq\"]'); b && b.click(); }"""
+TRIP = """() => { const A = window.__app; const t = A.trips && A.trips.filter((x) => x.e <= A.k.clock).pop(); if (t) window.__ui.openTrip({ k: t.k }); }"""
+PREP = "() => { localStorage.removeItem('kvb-ui-v1'); }"
 FULL = "() => window.__ui.setSheet('full')"
+WAIT = "() => new Promise((r) => setTimeout(r, 3000))"
 
 SHOTS = [
-    ("phone-karte", PHONE, "#karte", []),
-    ("phone-karte-station", PHONE, "#karte", [PICK_STATION]),
-    ("phone-karte-play", PHONE, "#karte", [PLAY]),
-    ("phone-karte-mehr", PHONE, "#karte", [FILTER_OPEN]),
-    ("phone-erreichbarkeit", PHONE, "#analyse/erreichbarkeit", []),
-    ("phone-erreichbarkeit-punkt", PHONE, "#analyse/erreichbarkeit", [POINT]),
-    ("phone-filter", PHONE, "#analyse/erreichbarkeit", [FILTER_OPEN]),
-    ("phone-dichte", PHONE, "#analyse/dichte", []),
-    ("phone-stroeme", PHONE, "#analyse/stroeme", []),
-    ("phone-nutzung", PHONE, "#analyse/nutzung", [FULL]),
-    ("phone-stationen", PHONE, "#analyse/stationen", []),
-    ("phone-standzeit", PHONE, "#analyse/standzeit", [FULL]),
-    ("phone-dark-karte", {**PHONE, "color_scheme": "dark"}, "#karte", []),
-    ("phone-dark-erreichbarkeit", {**PHONE, "color_scheme": "dark"}, "#analyse/erreichbarkeit", []),
-    ("desktop-karte", DESK, "#karte", [PICK_STATION]),
-    ("desktop-erreichbarkeit", DESK, "#analyse/erreichbarkeit", [POINT]),
-    ("desktop-stroeme", DESK, "#analyse/stroeme", []),
-    ("desktop-nutzung", DESK, "#analyse/nutzung", []),
-    ("desktop-dark-dichte", {**DESK, "color_scheme": "dark"}, "#analyse/dichte", []),
+    ("phone-karte", PHONE, "", []),
+    ("phone-station", PHONE, "", [PICK_STATION]),
+    ("phone-rueckblick", PHONE, "", [MID_FRAME, WAIT]),
+    ("phone-haeufigkeit", PHONE, "", [MID_FRAME, FREQ, WAIT]),
+    ("phone-fahrt-profil", PHONE, "", [MID_FRAME, WAIT, TRIP, WAIT]),
+    ("phone-verfuegbarkeit", PHONE, "", [AVAIL, WAIT]),
+    ("phone-verfuegbarkeit-punkt", PHONE, "", [AVAIL, WAIT, POINT]),
+    ("phone-einstellungen", PHONE, "", [MORE_OPEN]),
+    ("phone-dark-karte", {**PHONE, "color_scheme": "dark"}, "", [MID_FRAME, WAIT]),
+    ("desktop-karte", DESK, "", [PICK_STATION]),
+    ("desktop-rueckblick", DESK, "", [MID_FRAME, WAIT]),
+    ("desktop-dark-verfuegbarkeit", {**DESK, "color_scheme": "dark"}, "", [AVAIL, WAIT, POINT]),
 ]
-
 
 def main(site: str, out: str) -> int:
     out_dir = Path(out)
@@ -68,7 +64,7 @@ def main(site: str, out: str) -> int:
             page.on("pageerror", lambda e, errs=errs: errs.append(str(e)))
             page.on("console", lambda m, errs=errs: errs.append(m.text) if m.type == "error" else None)
             page.goto(f"http://127.0.0.1:8765/")
-            page.evaluate(PREP)  # whole day, all days: shows the most data while history is short
+            page.evaluate(PREP)  # default settings
             page.goto(f"http://127.0.0.1:8765/{hash_}")
             page.reload()
             try:

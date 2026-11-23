@@ -7,14 +7,16 @@ services:
     restart: unless-stopped
     environment:
       # How often to poll the nextbike API (minutes, fractions allowed, min 1).
-      - UPDATE_INTERVAL_MINUTES=${UPDATE_INTERVAL_MINUTES:-4}
+      # nextbike refreshes its data once a minute (GBFS ttl = 60 s), so 1 is the
+      # finest that makes sense; 2 halves the load and still dates trips to +-1 min.
+      - UPDATE_INTERVAL_MINUTES=${UPDATE_INTERVAL_MINUTES:-2}
       # Visitors can trigger a poll from the page ("Jetzt neu abfragen"), but for
       # everyone together at most once per this many minutes. 0 = off.
       - MANUAL_REFRESH_MINUTES=${MANUAL_REFRESH_MINUTES:-1}
       # Each wait varies by up to this many seconds (+/-), so polls are not exactly periodic
-      - UPDATE_JITTER_SECONDS=${UPDATE_JITTER_SECONDS:-30}
+      - UPDATE_JITTER_SECONDS=${UPDATE_JITTER_SECONDS:-15}
       # Polls closer together than this are merged in the timeline (raw CSV keeps all)
-      - TIMELINE_STEP_MINUTES=${TIMELINE_STEP_MINUTES:-2}
+      - TIMELINE_STEP_MINUTES=${TIMELINE_STEP_MINUTES:-1}
       # Longest period the page offers for one bike's or station's history (days)
       - TRAIL_MAX_DAYS=${TRAIL_MAX_DAYS:-7}
       # nextbike network id; "kg" = KVB-Rad Köln. Or pin one city via NEXTBIKE_CITY_ID
@@ -29,7 +31,7 @@ services:
       - RENDER_PNG=${RENDER_PNG:-true}
       # Rebuild the history files for timeline and analysis at most this often
       # (minutes). Same as the poll interval = every poll shows up right away.
-      - ANALYSIS_INTERVAL_MINUTES=${ANALYSIS_INTERVAL_MINUTES:-4}
+      - ANALYSIS_INTERVAL_MINUTES=${ANALYSIS_INTERVAL_MINUTES:-2}
       # How many days of history the web app can load
       - ANALYSIS_DAYS=${ANALYSIS_DAYS:-56}
       - PORT=8080
