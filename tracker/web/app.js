@@ -108,7 +108,7 @@
     mode: 'karte', cfg: null, o: loadO(),
     live: null, tl: null, trips: null, away: [], me: null, sel: null, hist: null, hp: { h: 24, from: null, to: null },
     k: { span: 24, end: null, isLive: true, frame: -1, clock: 0, playing: false, speed: 1, liveInuse: null },
-    layers: { stations: true, free: true, trips: true, avail: false },
+    layers: { stations: true, free: true, trips: true, avail: true },
   };
   const tripParams = () => ({ minGone: S.o.minGone, jump: S.o.jump, maxDur: S.o.maxDurH * 3600, maxKmh: S.o.maxKmh });
 
