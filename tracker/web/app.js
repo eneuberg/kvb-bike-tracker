@@ -742,6 +742,7 @@
   }
 
   let lastRendered = -2;
+  let lastBikesAt = 0;
   function renderKarte(force) {
     if (!styleReady || S.mode !== 'karte') return;
     const T = S.tl, k = S.k;
@@ -751,7 +752,9 @@
       k.clock = S.live.t;
       setClock(S.live.t, true);
     } else {
-      if (force || lastRendered !== k.frame) { renderFrameBikes(k.frame); lastRendered = k.frame; }
+      // while playing, redraw the bikes at most ~8 times per second (minute data has ~15 polls per second at 1×)
+      const due = !k.playing || performance.now() - lastBikesAt > 120;
+      if (force || (lastRendered !== k.frame && due)) { renderFrameBikes(k.frame); lastRendered = k.frame; lastBikesAt = performance.now(); }
       if (!k.playing) k.clock = T.t[k.frame];
       setClock(k.clock, false);
     }
@@ -1048,13 +1051,16 @@
   function setupScrubber() {
     const T = S.tl, r = $('#tlRange');
     if (!T || !T.t.length) return;
-    const i0 = T.i0, i1 = T.t.length - 1, liveIdx = i1 + 1;
-    r.disabled = false;
-    r.min = i0; r.max = liveIdx;
-    if (S.k.isLive) r.value = liveIdx;
-    else { S.k.frame = Math.min(Math.max(S.k.frame, i0), i1); r.value = S.k.frame; }
-    const svg = $('#tlSpark');
+    const i0 = T.i0, i1 = T.t.length - 1;
+    // the slider runs on time (seconds), like the axis below it; polls are
+    // uneven (hours apart in old data, a minute apart now), so an index slider
+    // would crawl through sparse stretches and race through dense ones
     const ts = T.t[i0], te = Math.max(S.live?.t || 0, T.t[i1]), span = Math.max(1, te - ts);
+    r.disabled = false;
+    r.min = ts; r.max = te; r.step = 1;
+    if (S.k.isLive) r.value = te;
+    else { S.k.frame = Math.min(Math.max(S.k.frame, i0), i1); r.value = T.t[S.k.frame]; }
+    const svg = $('#tlSpark');
     const X = (t) => ((t - ts) / span) * 1000;
     const vals = T.inuse ? T.inuse.slice(i0, i1 + 1) : null;
     let d = '';
@@ -1084,7 +1090,7 @@
     stopPlay();
     if (S.tl && !S.tl.loaded) { S.k.isLive = true; reloadTimeline(); return; } // newer data arrived meanwhile
     S.k.isLive = true;
-    if (S.tl) $('#tlRange').value = S.tl.t.length;
+    if (S.tl) $('#tlRange').value = $('#tlRange').max;
     closeDetail(true);
     renderKarte(true); updateStatus();
   }
@@ -1115,11 +1121,13 @@
     updateStatus();
     const step = (ts) => {
       if (!S.k.playing) return;
-      const dt = Math.min(0.1, (ts - playLast) / 1000); playLast = ts;
+      // real elapsed time, so the clock keeps its speed even when frames are slow (cap only long stalls)
+      const dt = Math.min(0.5, (ts - playLast) / 1000); playLast = ts;
       S.k.clock += dt * RATE[S.k.speed];
       let f = S.k.frame;
       while (f + 1 < T.t.length && T.t[f + 1] <= S.k.clock) f++;
-      if (f !== S.k.frame) { S.k.frame = f; $('#tlRange').value = f; }
+      if (f !== S.k.frame) S.k.frame = f;
+      $('#tlRange').value = S.k.clock; // glides with the clock
       if (S.k.clock >= T.t[T.t.length - 1]) { goLive(); return; }
       renderKarte();
       playRaf = requestAnimationFrame(step);
@@ -1913,6 +1921,8 @@
   }
 
   // ================================================================ events
+  // last poll at or before t (binary search)
+  const frameAt = (t) => { const T = S.tl; let lo = T.i0, hi = T.t.length - 1; while (lo < hi) { const m = (lo + hi + 1) >> 1; if (T.t[m] <= t) lo = m; else hi = m - 1; } return lo; };
   const nearestFrame = (t) => { const T = S.tl; let best = 0; for (let i = 0; i < T.t.length; i++) if (Math.abs(T.t[i] - t) < Math.abs(T.t[best] - t)) best = i; return best; };
 
   async function reloadTimeline() {
@@ -1953,7 +1963,11 @@
     $('#tlRange').addEventListener('input', (e) => {
       stopPlay();
       if (scrubRaf) return; // one render per frame, always with the newest position
-      scrubRaf = requestAnimationFrame(() => { scrubRaf = 0; setFrame(+$('#tlRange').value); });
+      scrubRaf = requestAnimationFrame(() => {
+        scrubRaf = 0;
+        const r = $('#tlRange'), t = +r.value;
+        if (t >= +r.max - 30) goLive(); else setFrame(frameAt(t));
+      });
     });
     $('#tlPlay').addEventListener('click', () => (S.k.playing ? stopPlay() : startPlay()));
     $('#tlLive').addEventListener('click', goLive);
@@ -1973,10 +1987,12 @@
       const ae = document.activeElement;
       if (/input|textarea|select/i.test(ae?.tagName) && ae.type !== 'range') return;
       if ((e.key === 'ArrowRight' || e.key === 'ArrowLeft') && ae?.id !== 'tlRange') {
-        const r = $('#tlRange');
-        const cur = S.k.isLive ? +r.max : S.k.frame;
-        const nx = Math.min(Math.max(cur + (e.key === 'ArrowRight' ? 1 : -1), +r.min), +r.max);
-        r.value = nx; stopPlay(); setFrame(nx); e.preventDefault();
+        const r = $('#tlRange'), T = S.tl;
+        const cur = S.k.isLive ? T.t.length : S.k.frame;
+        const nx = Math.min(Math.max(cur + (e.key === 'ArrowRight' ? 1 : -1), T.i0), T.t.length);
+        stopPlay(); e.preventDefault();
+        if (nx >= T.t.length) { goLive(); return; }
+        r.value = T.t[nx]; setFrame(nx);
       } else if (e.key === ' ' && ae === document.body) { if (S.k.playing) stopPlay(); else startPlay(); e.preventDefault(); }
     });
 
@@ -2006,7 +2022,7 @@
         if (t - f > maxS) toast(`Höchstens ${Math.round(maxHistH() / 24)} Tage, der Beginn wurde angepasst.`);
         S.hp = { h: S.hp.h, from: Math.max(f, t - maxS), to: t }; reloadHist();
       }
-      else if (a === 'frame') { const i = nearestFrame(+el.dataset.t); $('#tlRange').value = i; setFrame(i); }
+      else if (a === 'frame') { const i = nearestFrame(+el.dataset.t); $('#tlRange').value = S.tl.t[i]; setFrame(i); }
       else if (a === 'pointme' && S.me) {
         if (!S.layers.avail) setLayer('avail', true);
         setTimeout(() => { pointQuery(S.me[0], S.me[1]); flyTo(S.me, 14.5); }, 60);
