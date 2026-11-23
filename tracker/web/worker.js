@@ -33,8 +33,50 @@ function info(t) {
 const inWindow = (min, t0, t1) => (t0 === t1 ? true : t0 < t1 ? min >= t0 && min < t1 : min >= t0 || min < t1);
 
 // ------------------------------------------------------------------ loading
-async function loadDay(date) {
-  if (DAYS.has(date)) return DAYS.get(date);
+// ------------------------------------------------------------------ PNG
+// A plain PNG encoder (no filters, native deflate). Canvas encoding goes
+// through the GPU process and took seconds while the map was animating;
+// this takes ~0.1 s for a million pixels and needs no canvas.
+const CRC_T = new Uint32Array(256);
+for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; CRC_T[n] = c >>> 0; }
+function crc32(u8) { let c = 0xffffffff; for (let i = 0; i < u8.length; i++) c = CRC_T[(c ^ u8[i]) & 255] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; }
+async function encodePNG(rgba, w, h) {
+  if (typeof CompressionStream === 'undefined') {
+    const cv = new OffscreenCanvas(w, h);
+    cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(rgba.buffer, rgba.byteOffset, rgba.byteLength), w, h), 0, 0);
+    return cv.convertToBlob({ type: 'image/png' });
+  }
+  const px = new Uint8Array(rgba.buffer, rgba.byteOffset, rgba.byteLength), row = w * 4;
+  const raw = new Uint8Array((row + 1) * h); // each row: filter byte 0, then the pixels
+  for (let y = 0; y < h; y++) raw.set(px.subarray(y * row, (y + 1) * row), y * (row + 1) + 1);
+  const z = new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new CompressionStream('deflate'))).arrayBuffer());
+  const chunk = (type, data) => {
+    const out = new Uint8Array(12 + data.length), dv = new DataView(out.buffer);
+    dv.setUint32(0, data.length);
+    for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+    out.set(data, 8);
+    dv.setUint32(8 + data.length, crc32(out.subarray(4, 8 + data.length)));
+    return out;
+  };
+  const ihdr = new Uint8Array(13), dv = new DataView(ihdr.buffer);
+  dv.setUint32(0, w); dv.setUint32(4, h); ihdr.set([8, 6, 0, 0, 0], 8); // 8 bit RGBA
+  return new Blob([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', z), chunk('IEND', new Uint8Array(0))], { type: 'image/png' });
+}
+
+// several days at once (6 in parallel); the same day is never fetched twice
+const LOADING = new Map();
+async function loadDays(dates) {
+  const todo = dates.filter((d) => !DAYS.has(d));
+  let i = 0;
+  const next = async () => { while (i < todo.length) await loadDay(todo[i++]); };
+  await Promise.all(Array.from({ length: Math.min(6, todo.length) }, next));
+}
+function loadDay(date) {
+  if (DAYS.has(date)) return Promise.resolve(DAYS.get(date));
+  if (!LOADING.has(date)) LOADING.set(date, loadDayNow(date).finally(() => LOADING.delete(date)));
+  return LOADING.get(date);
+}
+async function loadDayNow(date) {
   const r = await fetch(`${BASE}tl/${date}.json?v=${encodeURIComponent(VER || Math.floor(Date.now() / 600000))}`);
   if (!r.ok) throw new Error(`tl/${date}.json: ${r.status}`);
   const d = await r.json();
@@ -527,10 +569,10 @@ function areaBBox(dates, bb) {
   const c = { s: Math.max(a.s, bb.s), n: Math.min(a.n, bb.n), w: Math.max(a.w, bb.w), e: Math.min(a.e, bb.e) };
   return c.s < c.n && c.w < c.e ? c : a;
 }
-function reachCompute({ F, dates, res, maxPolls = 150, bb }) {
+function reachCompute({ F, dates, res, maxPolls = 150, minPolls = 24, bb }) {
   const g = grid(res, areaBBox(dates, bb)), NC = g.W * g.H, NB = EDGES.length + 1;
   // time budget: about 60 million cell updates; finer rasters use fewer polls
-  maxPolls = Math.max(24, Math.min(maxPolls, Math.floor(6e7 / NC)));
+  maxPolls = Math.max(minPolls, Math.min(maxPolls, Math.floor(6e7 / NC)));
   const key = `${JSON.stringify(F)}|${dates.join(',')}|${res}|${maxPolls}|${JSON.stringify(g.bb)}`;
   if (reachCache.key === key) return reachCache;
   const hist = new Uint16Array(NC * NB);
@@ -625,8 +667,10 @@ function classify(g, vals, classes, transparentIf) {
   return out;
 }
 
-function reach({ F, dates, res, metric, R, classes, bb }) {
-  const c = reachCompute({ F, dates, res, bb });
+// preview (during playback): few polls and a coarse picture, so it keeps up
+function reach({ F, dates, res, metric, R, classes, bb, preview }) {
+  const c = reachCompute({ F, dates, res, bb, maxPolls: preview ? 24 : 150, minPolls: preview ? 12 : 24 });
+  const maxPx = preview ? 1.2e6 : 4.2e6;
   const { g, hist, polls } = c, NC = g.W * g.H, NB = EDGES.length + 1;
   const vals = new Float32Array(NC);
   if (metric === 'prob') {
@@ -636,7 +680,7 @@ function reach({ F, dates, res, metric, R, classes, bb }) {
       vals[i] = polls ? (n * 100) / polls : 0;
     }
     const shown = blur(g, vals, 0.8);
-    const img = classifySmooth(g, shown, classes, (v) => v < 1);
+    const img = classifySmooth(g, shown, classes, (v) => v < 1, maxPx);
     return { w: img.w, h: img.h, bbox: gbox(g), rgba: img.rgba, vals, polls, days: c.days, sampled: c.sampled, res };
   }
   // median distance across the sampled polls, interpolated inside its bin
@@ -649,7 +693,7 @@ function reach({ F, dates, res, metric, R, classes, bb }) {
     vals[i] = lo + ((polls / 2 - acc) / inBin) * (hi - lo);
   }
   const shown = blur(g, vals, 0.8);
-  const img = classifySmooth(g, shown, classes, (v) => v < 0 || v > classes[classes.length - 1][0]);
+  const img = classifySmooth(g, shown, classes, (v) => v < 0 || v > classes[classes.length - 1][0], maxPx);
   return { w: img.w, h: img.h, bbox: gbox(g), rgba: img.rgba, vals, polls, days: c.days, sampled: c.sampled, res };
 }
 
@@ -1033,15 +1077,19 @@ const OPS = {
     activeBB = { key: '', bb: BBOX };
     return true;
   },
-  async load({ dates }) { for (const d of dates) await loadDay(d); return { bikes: G.bikeIds.length, stations: G.st.length }; },
+  async load({ dates }) { await loadDays(dates); return { bikes: G.bikeIds.length, stations: G.st.length }; },
   avail, density, point, stations, stationProfile, usage, flows, inuseSeries, reach, tripsList, coverage,
 };
 self.onmessage = async (e) => {
   const { id, op, args, ver } = e.data;
   if (ver) VER = ver;
   try {
-    if (args && args.dates) for (const d of args.dates) await loadDay(d);
+    if (args && args.dates) await loadDays(args.dates);
     const res = await OPS[op](args || {});
+    // raster images are encoded to PNG here, off the main thread (it took seconds there)
+    if (res && res.rgba) {
+      try { res.blob = await encodePNG(res.rgba, res.w, res.h); delete res.rgba; } catch { /* the page falls back to encoding itself */ }
+    }
     const transfer = [];
     for (const k of ['rgba', 'vals', 'trips']) if (res && res[k] && res[k].buffer instanceof ArrayBuffer) transfer.push(res[k].buffer);
     self.postMessage({ id, ok: true, res }, transfer);

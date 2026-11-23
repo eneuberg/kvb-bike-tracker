@@ -65,13 +65,14 @@
             <button class="livebtn" id="tlLive" type="button" aria-pressed="true"><span class="dot"></span>Live</button>
           </div>
           <div class="track">
+            <div class="winband" id="tlWin" hidden></div>
             <svg id="tlSpark" class="spark" preserveAspectRatio="none" aria-hidden="true"></svg>
             <input type="range" id="tlRange" min="0" max="0" value="0" step="1" aria-label="Zeitpunkt" disabled>
           </div>
           <div class="ticks" id="tlTicks" aria-hidden="true"></div>
           <!-- how far back trips are shown; only for the trips layer -->
-          <div class="winrow" id="winRow"><span>Fahrten der letzten</span>
-            <div class="seg xs" role="radiogroup" aria-label="Fahrten der letzten" data-set="win">
+          <div class="winrow" id="winRow"><span><i class="wb"></i>Fahrten davor</span>
+            <div class="seg xs" role="radiogroup" aria-label="Fahrten im Zeitraum vor dem gezeigten Zeitpunkt" data-set="win">
               <button role="radio" data-v="15">15 Min.</button><button role="radio" data-v="60">1 Std.</button>
               <button role="radio" data-v="180">3 Std.</button><button role="radio" data-v="1440">24 Std.</button></div></div>
         </div>

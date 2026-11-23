@@ -638,15 +638,24 @@
   const addDays = (date, n) => { const d = new Date(`${date}T12:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
   const fmtD = (date) => `${date.slice(8, 10)}.${date.slice(5, 7)}.`;
 
-  let worker = null, rid = 0;
+  // Two workers from the same file: one for the history (availability,
+  // statistics, profiles), one only for routing trips. Routing a few hundred
+  // trips takes a second or two, and must not hold up the availability map.
+  let rid = 0;
   const pending = new Map();
-  function rpc(op, args) {
-    if (!worker) {
-      worker = new Worker(`worker.js?v=${S.cfg?.app || ''}`);
-      worker.onmessage = (e) => { const p = pending.get(e.data.id); pending.delete(e.data.id); if (p) (e.data.ok ? p.res(e.data.res) : p.rej(new Error(e.data.err))); };
-      worker.postMessage({ id: 0, op: 'init', args: { base: new URL('.', location.href).href, graph: S.cfg?.graph || '' } });
+  const workers = {};
+  function getWorker(name) {
+    if (!workers[name]) {
+      const w = workers[name] = new Worker(`worker.js?v=${S.cfg?.app || ''}`);
+      w.onmessage = (e) => { const p = pending.get(e.data.id); pending.delete(e.data.id); if (p) (e.data.ok ? p.res(e.data.res) : p.rej(new Error(e.data.err))); };
+      w.postMessage({ id: 0, op: 'init', args: { base: new URL('.', location.href).href, graph: S.cfg?.graph || '' } });
     }
-    return new Promise((res, rej) => { const id = ++rid; pending.set(id, { res, rej }); worker.postMessage({ id, op, args, ver: dataVer }); });
+    return workers[name];
+  }
+  const ROUTER_OPS = new Set(['routes', 'edges']);
+  function rpc(op, args) {
+    const w = getWorker(ROUTER_OPS.has(op) ? 'router' : 'main');
+    return new Promise((res, rej) => { const id = ++rid; pending.set(id, { res, rej }); w.postMessage({ id, op, args, ver: dataVer }); });
   }
 
   // ================================================================ KARTE: one timeline, live at the right end
@@ -759,7 +768,7 @@
       setClock(k.clock, false);
     }
     renderTrips(k.clock);
-    if (S.layers.avail) scheduleOverlay(500);
+    if (S.layers.avail) scheduleOverlay(S.k.playing ? 120 : 500); // during playback: next preview right after the last one
   }
 
   function renderLiveBikes() {
@@ -798,7 +807,18 @@
     $('#sUse').textContent = use == null ? '–' : nf.format(use);
   }
 
+  // the trips window drawn on the timeline: a band that ends at the thumb
+  function updateWinBand() {
+    const el = $('#tlWin'); if (!el) return;
+    const { ts, te } = S.k, span = te - ts;
+    if (!S.tl || !S.layers.trips || !(span > 0)) { el.hidden = true; return; }
+    const t1 = S.k.isLive ? te : S.k.clock, t0 = Math.max(ts, t1 - S.o.win * 60);
+    el.hidden = false;
+    el.style.setProperty('--a', ((t0 - ts) / span).toFixed(4));
+    el.style.setProperty('--w', (Math.max(0, t1 - t0) / span).toFixed(4));
+  }
   function setClock(t, live) {
+    updateWinBand();
     $('#tlTime').textContent = fTime.format(new Date(t * 1000));
     const tot = S.total ? ` · ${nf.format(S.total)} Räder` : '';
     $('#tlDate').textContent = (live ? 'Live' : fDate.format(new Date(t * 1000))) + tot;
@@ -1060,6 +1080,7 @@
     r.min = ts; r.max = te; r.step = 1;
     if (S.k.isLive) r.value = te;
     else { S.k.frame = Math.min(Math.max(S.k.frame, i0), i1); r.value = T.t[S.k.frame]; }
+    S.k.ts = ts; S.k.te = te; updateWinBand();
     const svg = $('#tlSpark');
     const X = (t) => ((t - ts) / span) * 1000;
     const vals = T.inuse ? T.inuse.slice(i0, i1 + 1) : null;
@@ -1108,7 +1129,9 @@
   let playRaf = 0, playLast = 0;
   const RATE = { 1: 900, 2: 1800, 4: 3600 }; // simulated seconds per real second
   function stopPlay() {
+    const was = S.k.playing;
     S.k.playing = false; cancelAnimationFrame(playRaf);
+    if (was && S.layers.avail) scheduleOverlay(80); // the preview from playback, now in full quality
     $('#tlPlay').classList.remove('on'); $('#tlPlay').setAttribute('aria-label', 'Abspielen');
   }
   function startPlay() {
@@ -1233,15 +1256,11 @@
   }
   const datesFor = (t0, t1) => (tlIndex || []).map((d) => d.date).filter((d) => d >= isoLocal(t0) && d <= isoLocal(t1));
   function periodCtl() {
-    const custom = S.hp.from != null;
-    const [t0, t1] = histRange(), maxH = maxHistH();
+    const custom = S.hp.from != null, maxH = maxHistH();
     return `<div class="hper">
       <div class="seg sm" role="radiogroup" aria-label="Zeitraum">${HP.filter(([h]) => h <= maxH).map(([h, l]) =>
         `<button role="radio" data-act="hper" data-h="${h}" aria-checked="${!custom && S.hp.h === h}">${l}</button>`).join('')}</div>
-      <details class="hcustom"${custom ? ' open' : ''}><summary>Eigener Zeitraum (höchstens ${maxH >= 48 ? `${Math.round(maxH / 24)} Tage` : `${maxH} Std.`})</summary>
-        <div class="dates"><label class="field">von <input type="datetime-local" id="hFrom" value="${dtLocal(t0)}"></label>
-        <label class="field">bis <input type="datetime-local" id="hTo" value="${dtLocal(t1)}"></label></div>
-        <button class="btn sm ghost" type="button" data-act="hcustom">Anwenden</button></details></div>`;
+      </div>`;
   }
   const HIST_LEGEND = `<div class="hlegend">
     <span><i class="lg st"></i>an Station</span><span><i class="lg fr"></i>frei abgestellt</span><span><i class="lg snap"></i>Snapshot</span>
@@ -1330,8 +1349,8 @@
         const dur = it.t1 - it.t0;
         rows.push(`<li class="hrow trip" data-n="${n}"><button class="rowbtn" data-act="hfocus" data-n="${n}">
           <span class="ic route"></span>
-          <span class="main"><b>${it.service ? 'Lange weg (Werkstatt oder Umverteilung?)' : `Fahrt${it.absent ? '' : ' zwischen zwei Abfragen'}`}</b><small>${tm(it.t0)} → ${tm(it.t1)} · ${it.len ? `~${fmtDist(it.len)} Weg (geschätzt)` : `${fmtDist(it.d)} Luftlinie`}</small></span>
-          <span class="val">${it.absent ? fmtDur(Math.max(60, dur)) : '<small>zwischen 2 Abfragen</small>'}</span></button></li>`);
+          <span class="main"><b>${it.service ? 'Lange weg (Werkstatt oder Umverteilung?)' : 'Fahrt'}</b><small>${tm(it.t0)} → ${tm(it.t1)} · ${it.len ? `~${fmtDist(it.len)} Weg` : `${fmtDist(it.d)} Luftlinie`}</small></span>
+          <span class="val"${it.absent ? '' : ' title="Zwischen zwei Abfragen bewegt, ohne aus dem Feed zu verschwinden: höchstens so lange"'}>${it.absent ? fmtDur(Math.max(60, dur)) : `≤ ${fmtDur(Math.max(60, dur))}`}</span></button></li>`);
       } else {
         rows.push(`<li class="hrow shift" data-n="${n}"><button class="rowbtn" data-act="hfocus" data-n="${n}"><span class="ic shift"></span>
           <span class="main"><small>um ${fmtDist(it.d)} versetzt (GPS-Ungenauigkeit oder kurz verschoben)</small></span></button></li>`);
@@ -1452,17 +1471,30 @@
     const r = (x) => Math.round(x * 500) / 500; // stable keys while panning a little
     return { s: r(b.getSouth() - padLat), n: r(b.getNorth() + padLat), w: r(b.getWest() - padLng), e: r(b.getEast() + padLng) };
   }
-  let ovSeq = 0, ovTimer = 0, ovKey = '', ovInfo = null;
+  // One computation at a time. Requests that come in meanwhile are not queued:
+  // when it finishes, it runs once more with whatever is current then.
+  let ovSeq = 0, ovTimer = 0, ovKey = '', ovInfo = null, ovBusy = false, ovAgain = false, ovForce = false;
   function scheduleOverlay(delay = 300) {
     if (!S.layers.avail || ovTimer) return;
     ovTimer = setTimeout(() => { ovTimer = 0; computeOverlay(); }, delay);
   }
   async function computeOverlay(force) {
     if (!S.layers.avail || !styleReady) return;
+    if (ovBusy) { ovAgain = true; ovForce ||= !!force; return; }
+    ovBusy = true;
+    try { await runOverlay(force); } finally {
+      ovBusy = false;
+      if (ovAgain) { const f = ovForce; ovAgain = ovForce = false; computeOverlay(f); }
+    }
+  }
+  async function runOverlay(force) {
     try { await ensureIndex(); } catch { ovInfo = { err: 'Noch kein Verlauf vorhanden.' }; renderCtx(); return; }
     const b = availBasis();
-    const bb = S.o.res < 25 ? viewBBox() : null;
-    const key = JSON.stringify([b.F, b.dates, S.o.metric, S.o.R, S.o.res, bb]);
+    // while playing: a quick, coarser preview; full quality once you stop
+    const preview = S.k.playing;
+    const res = preview ? Math.max(50, S.o.res) : S.o.res;
+    const bb = res < 25 ? viewBBox() : null;
+    const key = JSON.stringify([b.F, b.dates, S.o.metric, S.o.R, res, bb, preview]);
     if (!force && key === ovKey) return;
     ovKey = key;
     const seq = ++ovSeq;
@@ -1471,14 +1503,14 @@
     if (!b.dates.length) { clearRaster(); ovInfo = { err: 'Für diese Tage gibt es noch keine Daten.' }; renderCtx(); return; }
     try {
       const r = S.o.metric === 'density'
-        ? await rpc('density', { F: b.F, dates: b.dates, res: S.o.res, smooth: Math.max(30, S.o.res * 2), stops: toStops(R.heat.slice(1), 0.25, 0.9), bb })
-        : await rpc('reach', { F: b.F, dates: b.dates, res: S.o.res, metric: S.o.metric, R: S.o.R, classes: S.o.metric === 'prob' ? probClasses() : distClasses(), bb });
+        ? await rpc('density', { F: b.F, dates: b.dates, res, smooth: Math.max(30, res * 2), stops: toStops(R.heat.slice(1), 0.25, 0.9), bb })
+        : await rpc('reach', { F: b.F, dates: b.dates, res, metric: S.o.metric, R: S.o.R, classes: S.o.metric === 'prob' ? probClasses() : distClasses(), bb, preview });
       if (seq !== ovSeq) return;
       if (!r.polls) { clearRaster(); ovInfo = { err: `${b.label}: an diesen Tagen noch keine Abfragen.`, label: b.label }; }
-      else { showRaster(r); ovInfo = { polls: r.polls, days: r.days, sampled: r.sampled, vmax: r.vmax, label: b.label }; }
+      else { showRaster(r); ovInfo = { polls: r.polls, days: r.days, sampled: r.sampled, vmax: r.vmax, label: b.label, preview }; }
     } catch (err) { console.error(err); ovInfo = { err: 'Die Berechnung ist fehlgeschlagen.' }; }
     renderCtx();
-    if (S.sel?.type === 'point') pointQuery(S.sel.lng, S.sel.lat, true);
+    if (!preview && S.sel?.type === 'point') pointQuery(S.sel.lng, S.sel.lat, true);
   }
 
   // the raster goes to the map as a PNG blob URL (encoded off the main thread by toBlob)
@@ -1486,6 +1518,14 @@
   function showRaster(r) {
     const src = map.getSource('raster'); if (!src) return;
     const seq = ++rasterSeq;
+    const b0 = r.bbox, coords = [[b0.w, b0.n], [b0.e, b0.n], [b0.e, b0.s], [b0.w, b0.s]];
+    if (r.blob) { // encoded in the worker
+      const url = URL.createObjectURL(r.blob);
+      src.updateImage({ url, coordinates: coords });
+      if (rasterUrl) setTimeout(URL.revokeObjectURL, 2000, rasterUrl);
+      rasterUrl = url;
+      return;
+    }
     rasterCv.width = r.w; rasterCv.height = r.h;
     rasterCv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(r.rgba.buffer || r.rgba), r.w, r.h), 0, 0);
     const b = r.bbox;
@@ -1515,6 +1555,13 @@
     if (S.o.color === 'freq') return `<div class="bar" style="background:${gradient(R.freq)}"></div><div class="grad-scale"><span>1 Fahrt</span><span>${tripMax > 1 ? `${nf.format(tripMax)} Fahrten` : 'mehr'} pro Abschnitt</span></div>`;
     return `<div class="durs">${DUR_LABELS.map((l, k) => `<div><i style="background:${C.dur[k]}"></i><span>${l}</span></div>`).join('')}</div>${widthLegend()}`;
   }
+  // the trips window as clock times, e.g. "17:22–18:22" or "Mo 18:22 – Di 18:22"
+  function winRange() {
+    const t1 = S.k.clock, t0 = t1 - S.o.win * 60, sameDay = isoLocal(t0) === isoLocal(t1);
+    const hm = (t) => fTime.format(new Date(t * 1000)), wd = (t) => fWd.format(new Date(t * 1000));
+    return sameDay ? `${hm(t0)}–${hm(t1)}` : `${wd(t0)} ${hm(t0)} – ${wd(t1)} ${hm(t1)}`;
+  }
+  const fWd = new Intl.DateTimeFormat('de-DE', { weekday: 'short', timeZone: 'Europe/Berlin' });
   const winText = () => (S.o.win >= 1440 ? '24 Std.' : S.o.win >= 60 ? `${S.o.win / 60} Std.` : `${S.o.win} Min.`);
 
   // the line under the layer chips: what the map shows right now
@@ -1526,13 +1573,13 @@
       const bits = [`<b>${nf.format(s.arrived)}</b> angekommen`];
       if (!S.k.isLive) bits.push(`<b>${nf.format(s.running)}</b> unterwegs`);
       else if (S.o.away) bits.push(`<b>${nf.format(s.away)}</b> losgefahren, noch unterwegs`);
-      parts.push(`<p class="line">Fahrten, letzte ${winText()}: ${bits.join(', ')}. Heute bisher <b>${nf.format(s.today)}</b>.</p><div class="legend">${tripLegend()}</div>`);
+      parts.push(`<p class="line">Fahrten ${winRange()}: ${bits.join(', ')}. Heute bisher <b>${nf.format(s.today)}</b>.</p><div class="legend">${tripLegend()}</div>`);
     }
     if (S.layers.avail) {
       const o = ovInfo || {};
       const lg = availLegend();
       const basis = o.err ? `<span class="warn-t">${esc(o.err)}</span>`
-        : `${o.label || ''}, ${S.o.days} Tage, ${WD_LABEL[S.o.wd]}${o.polls ? ` · ${nf.format(o.polls)} Abfragen${o.sampled > o.polls ? ' (Stichprobe)' : ''}` : ''}`;
+        : `${o.label || ''}, ${S.o.days} Tage, ${WD_LABEL[S.o.wd]}${o.polls ? ` · ${nf.format(o.polls)} Abfragen${o.sampled > o.polls ? ' (Stichprobe)' : ''}` : ''}${o.preview ? ' · Vorschau, volle Qualität nach dem Anhalten' : ''}`;
       parts.push(`<div class="legend"><div class="top"><div class="cap">${lg.cap}</div>${o.busy ? '<span class="busy">rechnet</span>' : ''}</div>${lg.body}</div>
         <div class="line hint-l">${basis}. Ort antippen für Details.</div>`);
     }
@@ -1715,7 +1762,7 @@
       const k = b.closest('[data-set]').dataset.set, v = b.dataset.v;
       S.o[k] = ['win', 'res', 'tod'].includes(k) ? +v : v;
       saveO(); syncSettings();
-      if (k === 'win') renderTrips(S.k.clock); // trips only; availability has its own time of day
+      if (k === 'win') { renderTrips(S.k.clock); updateWinBand(); } // trips only; availability has its own time of day
       else if (k === 'color') { applyVisibility(); renderTrips(S.k.clock); }
       else availChanged();
     });
@@ -1745,6 +1792,7 @@
       else { clearRaster(); ovInfo = null; S.sel = S.sel?.type === 'point' ? null : S.sel; setData('qpt', EMPTY); }
     }
     $('#winRow').hidden = !S.layers.trips;
+    updateWinBand();
     applyVisibility(); renderTrips(S.k.clock); renderCtx();
   }
 
@@ -2015,13 +2063,6 @@
       else if (a === 'cleartrail') { S.hist = null; S.histWant = null; setData('hist', EMPTY); applyVisibility(); closeDetail(); }
       else if (a === 'hfocus') histFocus(+el.dataset.n);
       else if (a === 'hper') { S.hp = { h: +el.dataset.h, from: null, to: null }; reloadHist(); }
-      else if (a === 'hcustom') {
-        const f = Date.parse($('#hFrom').value) / 1000, t = Date.parse($('#hTo').value) / 1000;
-        if (!(f < t)) { toast('Der Beginn muss vor dem Ende liegen.'); return; }
-        const maxS = maxHistH() * 3600;
-        if (t - f > maxS) toast(`Höchstens ${Math.round(maxHistH() / 24)} Tage, der Beginn wurde angepasst.`);
-        S.hp = { h: S.hp.h, from: Math.max(f, t - maxS), to: t }; reloadHist();
-      }
       else if (a === 'frame') { const i = nearestFrame(+el.dataset.t); $('#tlRange').value = S.tl.t[i]; setFrame(i); }
       else if (a === 'pointme' && S.me) {
         if (!S.layers.avail) setLayer('avail', true);

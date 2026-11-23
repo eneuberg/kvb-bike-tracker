@@ -433,9 +433,6 @@ h3.group { margin: 24px 0 0; color: var(--ink); font-weight: 600; }
 .sect { font: 600 13px/1.2 var(--font); text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 18px 0 8px; }
 .hper { margin: 10px 0 4px; }
 .seg.sm button { min-height: 34px; font-size: 13.5px; }
-.hcustom { margin-top: 8px; font-size: 13.5px; }
-.hcustom summary { cursor: pointer; color: var(--ink-2); }
-.hcustom .btn { margin-top: 8px; }
 .tiles.small .stat b { font-size: 19px; }
 .hsum { margin: 10px 0 4px; font-size: 14px; }
 .hlegend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 10px 0 2px; font-size: 12.5px; color: var(--ink-2); }
@@ -467,7 +464,12 @@ h3.group { margin: 24px 0 0; color: var(--ink); font-weight: 600; }
 /* ---------------------------------------------------------------- trips window under the timeline */
 .winrow { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
 .winrow[hidden] { display: none; }
-.winrow > span { font-size: 12.5px; color: var(--ink-2); white-space: nowrap; flex: none; }
+.winrow > span { font-size: 12.5px; color: var(--ink-2); white-space: nowrap; flex: none; display: inline-flex; align-items: center; gap: 6px; }
+.winrow .wb { width: 14px; height: 10px; border-radius: 2px; background: color-mix(in srgb, var(--t-end) 22%, transparent); border-right: 2px solid color-mix(in srgb, var(--t-end) 70%, transparent); }
+/* trips window on the timeline: same inset as the spark line */
+.winband { position: absolute; top: 0; bottom: 0; left: calc(11px + (100% - 22px) * var(--a, 0)); width: calc((100% - 22px) * var(--w, 0));
+  min-width: 2px; background: color-mix(in srgb, var(--t-end) 16%, transparent); border-left: 1.5px solid color-mix(in srgb, var(--t-end) 55%, transparent); pointer-events: none; }
+.winband[hidden] { display: none; }
 .seg.xs { flex: 1; padding: 2px; }
 .seg.xs button { min-height: 30px; padding: 0 6px; font-size: 13px; }
 @media (max-width: 370px) { .winrow > span { display: none; } }
