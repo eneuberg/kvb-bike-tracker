@@ -48,6 +48,8 @@
         <p id="status" class="status"><span class="pulse" aria-hidden="true"></span><span id="statusText">lädt …</span></p>
       </div>
     </div>
+    <button class="hbtn" id="btnCollapse" type="button" aria-label="Fenster ein- oder ausklappen" aria-expanded="true">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
   </header>
 
   <div class="scroll" id="scroll">
@@ -68,17 +70,12 @@
           </div>
           <div class="ticks" id="tlTicks" aria-hidden="true"></div>
         </div>
-        <div class="stats small" id="kStats">
-          <div class="stat"><b id="sTotal">–</b><span>Räder</span></div>
-          <div class="stat st"><b id="sStation">–</b><span>Station</span></div>
-          <div class="stat fr"><b id="sFree">–</b><span>frei</span></div>
-          <div class="stat tr"><b id="sUse">–</b><span>unterwegs</span></div>
-        </div>
-        <div class="chips layers" id="layers" role="group" aria-label="Ebenen">
-          <button class="chip on" data-layer="stations" aria-pressed="true"><i class="sw st"></i>Stationen</button>
-          <button class="chip on" data-layer="free" aria-pressed="true"><i class="sw fr"></i>Frei</button>
-          <button class="chip on" data-layer="trips" aria-pressed="true"><i class="sw tr"></i>Fahrten</button>
-          <button class="chip" data-layer="avail" aria-pressed="false"><i class="sw av"></i>Verfügbarkeit</button>
+        <!-- numbers and layer switches in one: tap a tile to show or hide it on the map -->
+        <div class="ltiles" id="layers" role="group" aria-label="Auf der Karte zeigen">
+          <button class="lt on" data-layer="stations" aria-pressed="true" title="Räder an Stationen ein-/ausblenden"><b id="sStation">–</b><span><i class="sw st"></i>an Station</span></button>
+          <button class="lt on" data-layer="free" aria-pressed="true" title="Frei abgestellte Räder ein-/ausblenden"><b id="sFree">–</b><span><i class="sw fr"></i>frei</span></button>
+          <button class="lt on" data-layer="trips" aria-pressed="true" title="Fahrten ein-/ausblenden"><b id="sUse">–</b><span><i class="sw tr"></i>unterwegs</span></button>
+          <button class="lt" data-layer="avail" aria-pressed="false" title="Wo findet man ein Rad? Ein-/ausblenden"><b class="av-ic"><i class="sw av"></i></b><span>Verfügbar&shy;keit</span></button>
         </div>
         <div class="ctx" id="ctx"></div>
         <button class="more-toggle" type="button" data-act="sheet"><span>Einstellungen, Statistik, Suche</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 15l6-6 6 6"/></svg></button>
@@ -94,9 +91,10 @@
           <div class="row"><h3>Farbe</h3>
             <div class="seg sm" role="radiogroup" data-set="color">
               <button role="radio" data-v="dir">Start → Ziel</button><button role="radio" data-v="dur">Dauer</button><button role="radio" data-v="freq">Häufigkeit</button></div>
-            <p class="hint">Häufigkeit: wie viele angekommene Fahrten (geschätzte Wege) über jeden Straßenabschnitt liefen. Zeigt die Hauptachsen.</p></div>
+            <p class="hint" data-hint-for="dir">Jede Fahrt läuft von Rot (Start) nach Blau (Ziel).</p>
+            <p class="hint" data-hint-for="dur">Die Farbe zeigt, wie lange das Rad an dieser Stelle schon unterwegs war.</p>
+            <p class="hint" data-hint-for="freq">Wie viele angekommene Fahrten (geschätzte Wege) über jeden Straßenabschnitt liefen. Zeigt die Hauptachsen.</p></div>
           <label class="toggle"><input type="checkbox" id="setAway"> <span>Live: gerade losgefahrene Räder zeigen</span></label>
-          <div class="tlegend" id="tripLegend"></div>
           <details class="explain"><summary>Was wird gezeigt?</summary>
             <p>Der Feed zeigt nur abgestellte Räder. Verschwindet ein Rad und taucht woanders wieder auf, ist das eine <b>geschätzte Fahrt</b>.</p>
             <ul><li><b>Angekommen</b> im Zeitfenster: ganzer Weg.</li>
@@ -166,6 +164,7 @@
       </div>
     </section>
   </div>
+  <div class="resize" id="resize" aria-hidden="true"></div>
 </aside>
 
 <div class="tip" id="tip" role="tooltip" hidden></div>

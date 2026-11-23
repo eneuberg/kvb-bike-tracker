@@ -892,13 +892,26 @@ function routeNow(g, lat0, lng0, lat1, lng1) {
   // include the walk from the bike to the street, so the line starts and ends at the bike
   const x0 = (lng0 - BBOX.w) * M_LNG, y0 = (lat0 - BBOX.s) * M_LAT, x1 = (lng1 - BBOX.w) * M_LNG, y1 = (lat1 - BBOX.s) * M_LAT;
   const all = [[x0, y0], ...pts, [x1, y1]];
-  const c = [];
   let len = 0;
-  for (let k = 0; k < all.length; k++) {
-    if (k) { const d = Math.hypot(all[k][0] - all[k - 1][0], all[k][1] - all[k - 1][1]); if (d < 0.3) continue; len += d; }
-    c.push(toLL(all[k][0], all[k][1]));
-  }
+  for (let k = 1; k < all.length; k++) len += Math.hypot(all[k][0] - all[k - 1][0], all[k][1] - all[k - 1][1]);
+  // fewer points for drawing (2.5 m tolerance): less work for the map on every frame
+  const c = simplifyXY(all, 2.5).map((q) => toLL(q[0], q[1]));
   return { c, len: Math.round(len), ed };
+}
+
+// Douglas-Peucker on [x, y] metres
+function simplifyXY(P, tol) {
+  if (P.length < 3) return P;
+  const keep = new Uint8Array(P.length); keep[0] = keep[P.length - 1] = 1;
+  const st = [[0, P.length - 1]];
+  while (st.length) {
+    const [i, j] = st.pop();
+    const [ax, ay] = P[i], [bx, by] = P[j], dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy) || 1e-9;
+    let best = -1, bi = -1;
+    for (let m = i + 1; m < j; m++) { const d = Math.abs(dy * P[m][0] - dx * P[m][1] + bx * ay - by * ax) / L; if (d > best) { best = d; bi = m; } }
+    if (best > tol) { keep[bi] = 1; st.push([i, bi], [bi, j]); }
+  }
+  return P.filter((_, k) => keep[k]);
 }
 
 async function routes({ pairs }) {

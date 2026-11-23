@@ -178,9 +178,12 @@
 
   function setupLayers() {
     const before = map.getStyle().layers.find((l) => l.type === 'symbol')?.id;
-    for (const id of ['bikes', 'stations', 'sel', 'me', 'qpt', 'tripsSeg', 'tripdots', 'corr'])
+    // small tile buffers: less data to cut and ship to the GPU on every update
+    for (const id of ['bikes', 'stations', 'tripdots'])
+      map.addSource(id, { type: 'geojson', data: EMPTY, buffer: 32 });
+    for (const id of ['sel', 'me', 'qpt', 'corr'])
       map.addSource(id, { type: 'geojson', data: EMPTY });
-    map.addSource('trips', { type: 'geojson', data: EMPTY, lineMetrics: true });
+    map.addSource('trips', { type: 'geojson', data: EMPTY, tolerance: 0.6, buffer: 64 });
     map.addSource('hist', { type: 'geojson', data: EMPTY, lineMetrics: true });
     map.addSource('raster', { type: 'image', url: PIXEL, coordinates: [[6.76, 51.09], [7.18, 51.09], [7.18, 50.83], [6.76, 50.83]] });
 
@@ -209,10 +212,8 @@
     }
 
     // trips: solid lines, red start -> blue destination, or coloured by minutes on the road
-    map.addLayer({ id: 'trips-grad', type: 'line', source: 'trips', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' },
-      paint: { 'line-width': lineW(1.6, 3.6), 'line-gradient': dirGradient, 'line-opacity': 0.62 } });
-    map.addLayer({ id: 'trips-seg', type: 'line', source: 'tripsSeg', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' },
-      paint: { 'line-width': lineW(1.6, 3.6), 'line-color': ['to-color', ['get', 'col']], 'line-opacity': 0.7 } });
+    map.addLayer({ id: 'trips-line', type: 'line', source: 'trips', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-width': lineW(1.4, 3.4), 'line-color': ['to-color', ['get', 'col']], 'line-opacity': 0.62 } });
     // how many trips use each street section: wider and darker = more
     map.addLayer({ id: 'trips-corr', type: 'line', source: 'corr', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' },
       paint: { 'line-width': ['interpolate', ['linear'], ['zoom'], 10, ['+', 0.8, ['*', 3, ['get', 'v']]], 16, ['+', 2, ['*', 10, ['get', 'v']]]],
@@ -254,7 +255,7 @@
     if (matchMedia('(hover: hover)').matches) {
       let raf = 0;
       map.on('mousemove', (e) => {
-        if (raf) return;
+        if (raf || map.isMoving()) return;
         raf = requestAnimationFrame(() => {
           raf = 0;
           map.getCanvas().style.cursor = pick(e.point) ? 'pointer' : S.layers.avail ? 'crosshair' : '';
@@ -273,8 +274,7 @@
     vis('stations-c', L.stations); vis('stations-t', L.stations);
     vis('free-dots', L.free);
     // while one bike's or station's history is open, everything else steps back
-    vis('trips-grad', L.trips && !h && S.o.color === 'dir');
-    vis('trips-seg', L.trips && !h && S.o.color === 'dur');
+    vis('trips-line', L.trips && !h && S.o.color !== 'freq');
     vis('trips-corr', L.trips && !h && S.o.color === 'freq');
     vis('trips-pt', L.trips && !h);
     map.setPaintProperty('free-dots', 'circle-opacity', h ? 0.25 : 1); map.setPaintProperty('free-dots', 'circle-stroke-opacity', h ? 0.25 : 1);
@@ -287,17 +287,27 @@
   }
 
   // ================================================================ picking
-  const PRIORITY = ['hist-stop', 'hist-stay', 'hist-route', 'trips-pt', 'stations-c', 'free-dots', 'trips-grad', 'trips-seg', 'trips-corr'];
+  // Trip lines and dots are a few huge Multi* features; asking the map for them
+  // is slow, so they are matched in JS (tripsAt) instead.
+  const PRIORITY = ['hist-stop', 'hist-stay', 'hist-route', 'stations-c', 'free-dots', 'trips-corr'];
   function pick(pt) {
-    const layers = PRIORITY.filter(isVis);
-    if (!layers.length) return null;
     const r = isDesktop() ? 6 : 14;
-    const fs = map.queryRenderedFeatures([[pt.x - r, pt.y - r], [pt.x + r, pt.y + r]], { layers });
-    if (!fs.length) return null;
+    const layers = PRIORITY.filter(isVis);
+    const fs = layers.length ? map.queryRenderedFeatures([[pt.x - r, pt.y - r], [pt.x + r, pt.y + r]], { layers }) : [];
     const rank = (f) => PRIORITY.indexOf(f.layer.id);
     const dist = (f) => { if (f.geometry.type !== 'Point') return 0; const p = map.project(f.geometry.coordinates); return Math.hypot(p.x - pt.x, p.y - pt.y); };
     fs.sort((a, b) => rank(a) - rank(b) || dist(a) - dist(b));
-    return fs[0];
+    const top = fs[0];
+    if (top && top.layer.id.startsWith('hist')) return top;
+    // a trip endpoint or line beats a station only when it is closer than the station's dot
+    if (isVis('trips-line') || isVis('trips-pt')) {
+      const near = top && top.geometry.type === 'Point' ? dist(top) : Infinity;
+      if (near > 4 && (drawn.length || drawn.away?.length)) {
+        const hit = tripsAt(map.unproject(pt), Math.min(r, near));
+        if (hit.ks.length || hit.away.length) return { layer: { id: 'trips-line' }, properties: {} };
+      }
+    }
+    return top || null;
   }
 
   function onMapClick(e) {
@@ -311,10 +321,12 @@
     switch (f.layer.id) {
       case 'stations-c': S.k.isLive ? showStation(p.uid) : showTlStation(p.i); break;
       case 'free-dots': S.k.isLive ? showBike(p.id) : showTlBike(p.i); break;
-      case 'trips-pt': case 'trips-grad': case 'trips-seg': case 'trips-corr': {
-        if (+p.away) { openTrip(p); break; }
-        const ks = tripsNear(e.point);
-        if (ks.length > 1) showTripPicker(ks); else if (ks.length) openTrip({ k: ks[0] });
+      case 'trips-pt': case 'trips-line': case 'trips-corr': {
+        const { ks, away } = tripsNear(e.point);
+        if (ks.length > 1) showTripPicker(ks);
+        else if (ks.length) openTrip({ k: ks[0] });
+        else if (away.length) showBikeHistory(away[0].bike, { away: away[0] });
+        else closeDetail();
         break;
       }
       case 'hist-stay': case 'hist-route': case 'hist-stop': histFocus(+p.n); break;
@@ -325,33 +337,50 @@
   function select(geom) { setData('sel', geom ? { type: 'Feature', geometry: geom, properties: {} } : EMPTY); }
   function flyTo(lnglat, zoom) {
     map.easeTo({ center: lnglat, zoom: Math.max(map.getZoom(), zoom ?? 14.5), duration: REDUCED ? 0 : 600,
-      padding: isDesktop() ? { left: 420, top: 0, right: 0, bottom: 0 } : { bottom: sheetVisibleHeight(), top: 0, left: 0, right: 0 } });
+      padding: mapPad(0) });
   }
 
-  // ================================================================ sheet (phones)
+  // ================================================================ panel
+  // Phones: a bottom sheet that stays where you let go, from just the header
+  // ("mini") up to full height; a flick snaps to the next stop.
+  // Desktop: a floating window, dragged by its header, resized at the corner,
+  // collapsible; position and size are remembered.
   const panel = $('#panel');
-  let sheetState = 'peek';
+  const PANEL_KEY = 'kvb-panel-v1';
+  let sheetState = 'peek', freeY = null;
   function peekHeight() {
-    const peek = $(`.mode[data-mode="${S.mode}"] .peek`);
+    const peek = $('.peek');
     return $('#grab').offsetHeight + $('#head').offsetHeight + (peek ? peek.offsetHeight : 0) + 4;
   }
+  const miniHeight = () => $('#grab').offsetHeight + $('#head').offsetHeight + 2;
   function sheetY(state) {
     const H = panel.offsetHeight;
+    if (state === 'free' && freeY != null) return Math.min(Math.max(0, freeY), H - miniHeight());
     if (state === 'full') return 0;
+    if (state === 'mini') return Math.max(0, H - miniHeight());
     if (state === 'half') return Math.max(0, H - Math.max(window.innerHeight * 0.62, peekHeight() + 160));
     return Math.max(0, H - peekHeight());
   }
   function setSheet(state) {
     if (isDesktop()) return;
     sheetState = state;
-    panel.dataset.sheet = state;
+    panel.dataset.sheet = state === 'free' ? (freeY < sheetY('peek') - 20 ? 'half' : 'peek') : state;
     panel.style.setProperty('--sheet-y', `${sheetY(state)}px`);
-    $$('.more-toggle').forEach((b) => b.setAttribute('aria-expanded', String(state !== 'peek')));
+    $$('.more-toggle').forEach((b) => b.setAttribute('aria-expanded', String(state !== 'peek' && state !== 'mini')));
+    $('#btnCollapse')?.setAttribute('aria-expanded', String(state !== 'mini'));
   }
   function sheetVisibleHeight() {
     if (isDesktop()) return 0;
     const y = parseFloat(panel.style.getPropertyValue('--sheet-y')) || 0;
     return panel.offsetHeight - y;
+  }
+  // map padding so content is not hidden behind the panel
+  function mapPad(m) {
+    if (!isDesktop()) return { top: m + 50, left: m, right: m, bottom: sheetVisibleHeight() + m };
+    const r = panel.getBoundingClientRect(), W = innerWidth;
+    const pad = { top: m, left: m, right: m, bottom: m };
+    if (r.left + r.width / 2 < W / 2) pad.left = Math.min(W * 0.6, r.right + m); else pad.right = Math.min(W * 0.6, W - r.left + m);
+    return pad;
   }
   function initSheet() {
     let startY = 0, startOff = 0, dragging = false, moved = false, lastY = 0, lastT = 0, vel = 0;
@@ -368,28 +397,83 @@
       if (Math.abs(dy) > 4) moved = true;
       const t = performance.now();
       vel = (e.clientY - lastY) / Math.max(1, t - lastT); lastY = e.clientY; lastT = t;
-      panel.style.setProperty('--sheet-y', `${Math.min(Math.max(0, startOff + dy), sheetY('peek'))}px`);
+      panel.style.setProperty('--sheet-y', `${Math.min(Math.max(0, startOff + dy), sheetY('mini'))}px`);
     };
     const up = () => {
       if (!dragging) return;
       dragging = false; panel.classList.remove('dragging');
-      if (!moved) { setSheet(sheetState === 'peek' ? 'half' : 'peek'); return; }
+      if (!moved) { setSheet(sheetState === 'mini' ? 'peek' : 'mini'); return; }
       const y = parseFloat(panel.style.getPropertyValue('--sheet-y'));
-      const states = ['full', 'half', 'peek'].map((st) => ({ st, y: sheetY(st) }));
-      let best = states.reduce((a, b) => (Math.abs(b.y - y) < Math.abs(a.y - y) ? b : a));
-      if (Math.abs(vel) > 0.45) {
-        const cand = vel > 0 ? states.filter((x) => x.y > y + 1).sort((a, b) => a.y - b.y)[0] : states.filter((x) => x.y < y - 1).sort((a, b) => b.y - a.y)[0];
-        if (cand) best = cand;
+      if (Math.abs(vel) > 0.8) { // a flick: snap to the next stop in that direction
+        const stops = ['full', 'half', 'peek', 'mini'].map((st) => ({ st, y: sheetY(st) }));
+        const cand = vel > 0 ? stops.filter((x) => x.y > y + 1).sort((a, b) => a.y - b.y)[0] : stops.filter((x) => x.y < y - 1).sort((a, b) => b.y - a.y)[0];
+        if (cand) { setSheet(cand.st); return; }
       }
-      setSheet(best.st);
+      freeY = y; setSheet('free'); // stays where you let go
     };
     for (const el of [$('#grab'), $('#head')]) {
       el.addEventListener('pointerdown', down); el.addEventListener('pointermove', move);
       el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up);
     }
-    addEventListener('resize', () => setSheet(sheetState));
+    initWindow();
+    addEventListener('resize', () => { setSheet(sheetState); placeWindow(); });
     document.fonts?.ready.then(() => setSheet(sheetState));
     setSheet('peek');
+  }
+
+  // ---- desktop window
+  let win = null;
+  function loadWin() { try { return JSON.parse(localStorage.getItem(PANEL_KEY) || 'null'); } catch { return null; } }
+  function saveWin() { try { localStorage.setItem(PANEL_KEY, JSON.stringify(win)); } catch { /* ignore */ } }
+  function placeWindow() {
+    if (!isDesktop()) { panel.style.left = panel.style.top = panel.style.width = panel.style.height = ''; return; }
+    if (!win) return;
+    const W = innerWidth, H = innerHeight;
+    win.w = Math.min(Math.max(320, win.w), W - 16);
+    win.h = Math.min(Math.max(220, win.h), H - 16);
+    win.x = Math.min(Math.max(8, win.x), W - 120);
+    win.y = Math.min(Math.max(8, win.y), H - 56);
+    panel.style.left = `${win.x}px`; panel.style.top = `${win.y}px`;
+    panel.style.width = `${win.w}px`;
+    panel.style.height = win.collapsed ? '' : `${Math.min(win.h, H - win.y - 8)}px`;
+    panel.classList.toggle('collapsed', !!win.collapsed);
+    $('#btnCollapse')?.setAttribute('aria-expanded', String(!win.collapsed));
+  }
+  function initWindow() {
+    win = loadWin() || { x: 16, y: 16, w: 408, h: innerHeight - 32, collapsed: false };
+    placeWindow();
+    // drag by the header
+    let drag = null;
+    $('#head').addEventListener('pointerdown', (e) => {
+      if (!isDesktop() || e.button > 0 || e.target.closest('button, a, input')) return;
+      drag = { dx: e.clientX - win.x, dy: e.clientY - win.y, id: e.pointerId };
+      $('#head').setPointerCapture(e.pointerId); panel.classList.add('moving'); e.preventDefault();
+    });
+    $('#head').addEventListener('pointermove', (e) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      win.x = e.clientX - drag.dx; win.y = e.clientY - drag.dy; placeWindow();
+    });
+    const end = () => { if (!drag) return; drag = null; panel.classList.remove('moving'); saveWin(); };
+    $('#head').addEventListener('pointerup', end); $('#head').addEventListener('pointercancel', end);
+    // resize at the corner
+    let rs = null;
+    $('#resize').addEventListener('pointerdown', (e) => {
+      if (!isDesktop()) return;
+      rs = { x: e.clientX, y: e.clientY, w: win.w, h: win.h, id: e.pointerId };
+      $('#resize').setPointerCapture(e.pointerId); panel.classList.add('moving'); e.preventDefault();
+    });
+    $('#resize').addEventListener('pointermove', (e) => {
+      if (!rs || e.pointerId !== rs.id) return;
+      win.w = rs.w + e.clientX - rs.x; win.h = rs.h + e.clientY - rs.y; win.collapsed = false; placeWindow();
+    });
+    const rend = () => { if (!rs) return; rs = null; panel.classList.remove('moving'); saveWin(); };
+    $('#resize').addEventListener('pointerup', rend); $('#resize').addEventListener('pointercancel', rend);
+    $('#head').addEventListener('dblclick', (e) => { if (isDesktop() && !e.target.closest('button')) toggleCollapse(); });
+    $('#btnCollapse').addEventListener('click', toggleCollapse);
+  }
+  function toggleCollapse() {
+    if (isDesktop()) { win.collapsed = !win.collapsed; placeWindow(); saveWin(); }
+    else setSheet(sheetState === 'mini' ? 'peek' : 'mini');
   }
   const refreshSheet = () => requestAnimationFrame(() => setSheet(sheetState));
 
@@ -708,7 +792,7 @@
   }
 
   function setStats(total, st, fr, use) {
-    $('#sTotal').textContent = nf.format(total);
+    S.total = total;
     $('#sStation').textContent = nf.format(st);
     $('#sFree').textContent = nf.format(fr);
     $('#sUse').textContent = use == null ? '–' : nf.format(use);
@@ -716,7 +800,8 @@
 
   function setClock(t, live) {
     $('#tlTime').textContent = fTime.format(new Date(t * 1000));
-    $('#tlDate').textContent = live ? `Live, ${fDate.format(new Date(t * 1000))}` : fDate.format(new Date(t * 1000));
+    const tot = S.total ? ` · ${nf.format(S.total)} Räder` : '';
+    $('#tlDate').textContent = (live ? 'Live' : fDate.format(new Date(t * 1000))) + tot;
     const lb = $('#tlLive');
     lb.setAttribute('aria-pressed', String(live));
     lb.title = live ? 'Du siehst den aktuellen Stand' : 'Zum aktuellen Stand springen';
@@ -778,60 +863,104 @@
     finally { routeBusy = false; }
     renderTrips(S.k.clock);
   }
+  const bboxOf = (c) => { let a = 180, b = 90, x = -180, y = -90; for (const p of c) { if (p[0] < a) a = p[0]; if (p[0] > x) x = p[0]; if (p[1] < b) b = p[1]; if (p[1] > y) y = p[1]; } return [a, b, x, y]; };
   const pt = (c, props) => ({ type: 'Feature', geometry: { type: 'Point', coordinates: c }, properties: props });
   const ln = (c, props) => ({ type: 'Feature', geometry: { type: 'LineString', coordinates: c }, properties: props });
   let tripSum = { arrived: 0, running: 0, away: 0, today: 0 };
 
+  // Performance: everything is grouped by colour into a few Multi* features
+  // (one per colour step), so the map gets ~20 features instead of thousands,
+  // and no per-line gradient textures. Taps are matched geometrically.
+  const DIR_STEPS = 6;
+  const mix = (h1, h2, f) => { const a = rgb(h1), b = rgb(h2); return `rgb(${a.map((x, i) => Math.round(x + (b[i] - x) * f)).join(',')})`; };
+  const dirCols = () => (C.dirCols ||= Array.from({ length: DIR_STEPS }, (_, j) => mix(C.tStart, C.tEnd, j / (DIR_STEPS - 1))));
+  let drawn = [], lastTripsAt = 0, tripsTimer = 0;
   function renderTrips(clock) {
     if (!styleReady) return;
+    // while playing, ~8 updates per second are plenty
+    if (S.k.playing) {
+      const t = performance.now();
+      if (t - lastTripsAt < 120) { if (!tripsTimer) tripsTimer = setTimeout(() => { tripsTimer = 0; renderTrips(S.k.clock); }, 130); return; }
+      lastTripsAt = t;
+    }
     if (!S.trips || !S.layers.trips) {
-      setData('trips', EMPTY); setData('tripsSeg', EMPTY); setData('tripdots', EMPTY);
+      setData('trips', EMPTY); setData('tripdots', EMPTY); drawn = [];
       tripSum = { arrived: 0, running: 0, away: 0, today: 0 }; renderCtx(); return;
     }
-    const A = clock - S.o.win * 60, dir = S.o.color !== 'dur', freq = S.o.color === 'freq';
-    const freqPairs = [];
-    const lines = [], segs = [], dots = [], need = [];
+    const A = clock - S.o.win * 60, mode = S.o.color, dir = mode !== 'dur', freq = mode === 'freq';
+    const buckets = new Map(); // colour -> [lines]
+    const dotB = new Map();    // "fill|stroke|r|sw" -> [points]
+    const addL = (col, c) => { if (c.length > 1) { let l = buckets.get(col); if (!l) buckets.set(col, l = []); l.push(c); } };
+    const addP = (key, c) => { let l = dotB.get(key); if (!l) dotB.set(key, l = []); l.push(c); };
+    const freqPairs = [], need = [], nd = [];
     const sum = { arrived: 0, running: 0, away: 0, today: 0 };
-    const today = isoLocal(clock);
+    const dayStart = clock - localMin(clock) * 60 - (Math.floor(clock) % 60); // local midnight
+    const cols = dirCols();
     for (const tr of S.trips) {
       if (tr.s >= clock) break;
-      if (tr.e <= clock && isoLocal(tr.e) === today) sum.today++;
+      if (tr.e <= clock && tr.e >= dayStart) sum.today++;
       const arrived = tr.e > A && tr.e <= clock;
       const running = !arrived && tr.e > clock && !S.k.isLive;
       if (!arrived && !running) continue;
-      if (tr.route === undefined) { need.push(tr); }
+      if (tr.route === undefined) need.push(tr);
       const R = tr.route;
-      const c = R ? R.c : [tr.a, tr.b], L = R ? R.L : lenAlong(c);
+      const c = R ? R.c : [tr.a, tr.b], L = R ? R.L : lenAlong(c), T = L[L.length - 1];
       const dur = Math.max(60, tr.e - tr.s);
       const u = arrived ? 1 : Math.min(1, Math.max(0.02, (clock - tr.s) / dur));
-      const geom = u < 1 ? partial(c, L, u) : c;
-      const props = { k: tr.k };
       if (freq) { if (arrived) freqPairs.push(tr); }
-      else if (dir) lines.push(ln(geom, props));
-      else for (const p of durPieces(c, L, dur, u)) segs.push(ln(p.c, { k: tr.k, col: C.dur[p.k] }));
-      // stoppers: start (and destination, when arrived); a running trip gets a moving head
-      dots.push(pt(c[0], { k: tr.k, r: 3.6, sw: 1.2, fill: dir ? C.tStart : C.surface, stroke: dir ? C.surface : C.ink }));
-      if (arrived) { sum.arrived++; dots.push(pt(c[c.length - 1], { k: tr.k, r: 4, sw: 1.2, fill: dir ? C.tEnd : C.ink, stroke: C.surface })); }
+      else if (dir) {
+        // colour = progress along the trip, red at the start, blue at the destination
+        for (let j = 0; j < DIR_STEPS && j / DIR_STEPS < u; j++) addL(cols[j], slice(c, L, (j / DIR_STEPS) * T, Math.min((j + 1) / DIR_STEPS, u) * T));
+      } else for (const p of durPieces(c, L, dur, u)) addL(C.dur[p.k], p.c);
+      addP(`${dir ? C.tStart : C.surface}|${dir ? C.surface : C.ink}|3.6|1.2`, c[0]);
+      let head = null;
+      if (arrived) { sum.arrived++; addP(`${dir ? C.tEnd : C.ink}|${C.surface}|4|1.2`, c[c.length - 1]); }
       else {
         sum.running++;
-        const col = dir ? C.tEnd : C.dur[durClass((clock - tr.s) / 60)];
-        dots.push(pt(along(c, L, u), { k: tr.k, r: 4.6, sw: 2, fill: C.surface, stroke: col }));
+        head = along(c, L, u);
+        const col = dir ? cols[Math.min(DIR_STEPS - 1, Math.floor(u * DIR_STEPS))] : C.dur[durClass((clock - tr.s) / 60)];
+        addP(`${C.surface}|${col}|4.6|2`, head);
       }
+      nd.push({ k: tr.k, c: u < 1 ? partial(c, L, u) : c, bb: R ? (R.bb ||= bboxOf(c)) : bboxOf(c) });
     }
+    const away = [];
     if (S.k.isLive && S.o.away) {
       for (const a of S.away) {
         sum.away++;
-        const col = C.dur[durClass((clock - a.since) / 60)];
-        dots.push(pt(a.a, { away: 1, bike: a.bike, since: a.since, from: a.from || '', r: 5.5, sw: 2.2, fill: 'rgba(0,0,0,0)', stroke: col }));
+        addP(`rgba(0,0,0,0)|${C.dur[durClass((clock - a.since) / 60)]}|5.5|2.2`, a.a);
+        away.push(a);
       }
     }
-    setData('trips', { type: 'FeatureCollection', features: lines });
-    setData('tripsSeg', { type: 'FeatureCollection', features: segs });
+    drawn = nd; drawn.away = away;
+    setData('trips', { type: 'FeatureCollection', features: [...buckets].map(([col, l]) => ({ type: 'Feature', geometry: { type: 'MultiLineString', coordinates: l }, properties: { col } })) });
+    setData('tripdots', { type: 'FeatureCollection', features: [...dotB].map(([key, l]) => {
+      const [fill, stroke, r, sw] = key.split('|');
+      return { type: 'Feature', geometry: { type: 'MultiPoint', coordinates: l }, properties: { fill, stroke, r: +r, sw: +sw } };
+    }) });
     if (freq) updateCorridor(freqPairs); else if (corrKey) { corrKey = ''; setData('corr', EMPTY); }
-    setData('tripdots', { type: 'FeatureCollection', features: dots });
     tripSum = sum;
     renderCtx();
     if (need.length) fetchRoutes(need.slice(0, 600));
+  }
+
+  // trips under a tap, matched on the drawn geometry (metres, flat approximation)
+  function tripsAt(lngLat, px) {
+    const mpp = (156543.03 * Math.cos((lngLat.lat * Math.PI) / 180)) / 2 ** map.getZoom();
+    const r = px * mpp, kx = 111320 * Math.cos((lngLat.lat * Math.PI) / 180), ky = 110574;
+    const X = (p) => (p[0] - lngLat.lng) * kx, Y = (p) => (p[1] - lngLat.lat) * ky;
+    const segD = (a, b) => {
+      const ax = X(a), ay = Y(a), bx = X(b), by = Y(b), dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy;
+      const t = L2 ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / L2)) : 0;
+      return Math.hypot(ax + t * dx, ay + t * dy);
+    };
+    const ks = [], dl = r / kx, dt = r / ky;
+    for (const d of drawn) {
+      const c = d.c, bb = d.bb;
+      if (bb && (lngLat.lng < bb[0] - dl || lngLat.lng > bb[2] + dl || lngLat.lat < bb[1] - dt || lngLat.lat > bb[3] + dt)) continue;
+      if (c.length === 1 ? Math.hypot(X(c[0]), Y(c[0])) <= r : c.some((p, i) => i && segD(c[i - 1], p) <= r)) ks.push(d.k);
+    }
+    const away = (drawn.away || []).filter((a) => Math.hypot(X(a.a), Y(a.a)) <= r * 1.2);
+    return { ks, away };
   }
 
   // street sections by number of trips (arrived in the window), computed in the worker
@@ -861,16 +990,12 @@
   function tripsNear(point) {
     const r = isDesktop() ? 7 : 14, box = [[point.x - r, point.y - r], [point.x + r, point.y + r]];
     // "Häufigkeit": exactly the trips counted on the tapped section, so number and list agree
-    let fs = S.o.color === 'freq' && isVis('trips-corr') ? map.queryRenderedFeatures(box, { layers: ['trips-corr'] }) : [];
-    if (fs.length) fs = [fs.sort((a, b) => b.properties.n - a.properties.n)[0]];
-    else fs = map.queryRenderedFeatures(box, { layers: ['trips-pt', 'trips-grad', 'trips-seg'].filter(isVis) });
-    const ks = new Set();
-    for (const f of fs) {
-      const p = f.properties;
-      if (f.layer.id === 'trips-corr') { for (const k of S.corrList?.[+p.i] || []) ks.add(k); }
-      else if (p.k != null && !+p.away) ks.add(+p.k);
+    const fs = S.o.color === 'freq' && isVis('trips-corr') ? map.queryRenderedFeatures(box, { layers: ['trips-corr'] }) : [];
+    if (fs.length) {
+      const f = fs.sort((a, b) => b.properties.n - a.properties.n)[0];
+      return { ks: [...new Set(S.corrList?.[+f.properties.i] || [])], away: [] };
     }
-    return [...ks];
+    return tripsAt(map.unproject(point), r);
   }
   // a list to pick from; only these trips stay on the map
   function showTripPicker(ks) {
@@ -925,6 +1050,7 @@
       if (h === 0) days.push(t);
       if (sp <= 6 ? true : sp <= 24 ? h % 6 === 0 : sp <= 72 ? h === 0 || h === 12 : h === 12) ticks.push(t);
     }
+    if (ticks.length > 6) { const st = Math.ceil(ticks.length / 6); for (let k = ticks.length - 1; k >= 0; k--) if (k % st) ticks.splice(k, 1); }
     svg.setAttribute('viewBox', '0 0 1000 52');
     svg.innerHTML = `${days.map((t) => `<line class="day" x1="${X(t)}" x2="${X(t)}" y1="0" y2="52"/>`).join('')}
       ${d ? `<path class="area" d="${d}L${X(T.t[i1])},52L${X(T.t[i0])},52Z"/><path class="ln" d="${d}"/>` : ''}`;
@@ -1068,7 +1194,8 @@
   // ================================================================ history of one bike / one station
   const HP = [[6, '6 Std.'], [24, '24 Std.'], [72, '3 Tage'], [168, '7 Tage']];
   const maxHistH = () => Math.max(1, (S.cfg?.trail_max_days || 7) * 24);
-  const isoLocal = (t) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(t * 1000));
+  const fISO = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit' });
+  const isoLocal = (t) => fISO.format(new Date(t * 1000));
   const dtLocal = (t) => { const d = new Date(t * 1000); const p = (n) => String(n).padStart(2, '0'); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`; };
   function histRange() {
     const ref = S.k.isLive || !S.tl ? (S.live?.t || now()) : S.k.clock;
@@ -1143,7 +1270,7 @@
     if (n != null) add(H.items[n]); else H.items.forEach(add);
     if (H.type === 'station') b.extend(H.at);
     if (b.isEmpty()) return;
-    map.fitBounds(b, { padding: isDesktop() ? { left: 440, top: 60, right: 60, bottom: 60 } : { top: 70, left: 40, right: 40, bottom: sheetVisibleHeight() + 30 },
+    map.fitBounds(b, { padding: mapPad(isDesktop() ? 60 : 36),
       maxZoom: 16, duration: REDUCED ? 0 : 600 });
   }
   function histFocus(n) {
@@ -1350,7 +1477,7 @@
     return { cap: 'Abgestellte Räder pro Hektar, im Schnitt', body: `<div class="bar" style="background:${gradient(R.heat.slice(1))}"></div><div class="scale"><span>wenige</span><span>${ovInfo?.vmax ? `${nf1.format(ovInfo.vmax)} pro ha` : 'viele'}</span></div>` };
   }
   function tripLegend() {
-    if (S.o.color === 'dir') return `<div class="grad"></div><div class="grad-scale"><span>Start</span><span>Ziel</span></div>`;
+    if (S.o.color === 'dir') return `<div class="tleg"><span>Start</span><i class="stop s"></i><div class="grad"></div><i class="stop e"></i><span>Ziel</span></div>`;
     if (S.o.color === 'freq') return `<div class="bar" style="background:${gradient(R.freq)}"></div><div class="grad-scale"><span>1 Fahrt</span><span>${corrMax > 1 ? `${nf.format(corrMax)} Fahrten` : 'mehr'} pro Abschnitt</span></div>`;
     return `<div class="durs">${DUR_LABELS.map((l, k) => `<div><i style="background:${C.dur[k]}"></i><span>${l}</span></div>`).join('')}</div>`;
   }
@@ -1365,7 +1492,7 @@
       const bits = [`<b>${nf.format(s.arrived)}</b> angekommen`];
       if (!S.k.isLive) bits.push(`<b>${nf.format(s.running)}</b> unterwegs`);
       else if (S.o.away) bits.push(`<b>${nf.format(s.away)}</b> gerade losgefahren`);
-      parts.push(`<p class="line">Letzte ${winText()}: ${bits.join(', ')}. Heute bisher <b>${nf.format(s.today)}</b> Fahrten.</p><div class="legend">${tripLegend()}</div>`);
+      parts.push(`<p class="line">Fahrten, letzte ${winText()}: ${bits.join(', ')}. Heute bisher <b>${nf.format(s.today)}</b>.</p><div class="legend">${tripLegend()}</div>`);
     }
     if (S.layers.avail) {
       const o = ovInfo || {};
@@ -1375,10 +1502,18 @@
       parts.push(`<div class="legend"><div class="top"><div class="cap">${lg.cap}</div>${o.busy ? '<span class="busy">rechnet</span>' : ''}</div>${lg.body}</div>
         <div class="line hint-l">${basis}. Ort antippen für Details.</div>`);
     }
-    el.innerHTML = parts.join('');
-    const tl = $('#tripLegend'); if (tl) tl.innerHTML = tripLegend();
+    const html = parts.join('');
+    if (html === lastCtx) return;
+    // while scrubbing usually only the numbers change: patch them, no relayout of the panel
+    const skel = html.replace(/<b>[^<]*<\/b>/g, '<b></b>');
+    if (skel === lastSkel) {
+      const vals = [...html.matchAll(/<b>([^<]*)<\/b>/g)].map((m) => m[1]), bs = el.querySelectorAll('b');
+      if (bs.length === vals.length) { bs.forEach((b, i) => { if (b.textContent !== vals[i]) b.textContent = vals[i]; }); lastCtx = html; return; }
+    }
+    el.innerHTML = lastCtx = html; lastSkel = skel;
     refreshSheet();
   }
+  let lastCtx = null, lastSkel = null;
 
   // ---- point and station queries
   function circle([lng, lat], r) {
@@ -1523,6 +1658,7 @@
       for (const b of $$('button', g)) b.setAttribute('aria-checked', String(String(S.o[k]) === b.dataset.v));
     }
     $('#setAway').checked = !!S.o.away;
+    $$('[data-hint-for]').forEach((el) => { el.hidden = el.dataset.hintFor !== S.o.color; });
     $('#rowR').hidden = S.o.metric === 'median';
     $('#resHint').textContent = S.o.res < 25 ? '10 m rechnet nur den sichtbaren Ausschnitt und weniger Abfragen; genauer als etwa 25 m sind die Daten nicht.' : '';
     renderCtx();
@@ -1557,6 +1693,7 @@
     const el = $(sel);
     el.innerHTML = `<button class="x" type="button" aria-label="Schließen" data-act="close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>${html}`;
     el.hidden = false;
+    $('#panel').classList.add('has-detail'); // the detail takes the place of layers and settings
     bindCharts(el);
     if (!opts.keepSel) S.sel = null;
     if (!opts.quiet) {
@@ -1575,6 +1712,7 @@
   }
   function closeDetail(silent) {
     for (const el of $$('.detail')) { el.hidden = true; el.innerHTML = ''; }
+    $('#panel').classList.remove('has-detail');
     S.sel = null;
     if (S.hist || S.histWant) { S.hist = null; S.histWant = null; S.histToken = null; if (styleReady) setData('hist', EMPTY); }
     if (styleReady) { select(null); setData('qpt', EMPTY); applyVisibility(); }
@@ -1741,7 +1879,7 @@
   }
 
   function bindUI() {
-    $$('#layers .chip').forEach((c) => c.addEventListener('click', () => setLayer(c.dataset.layer, !S.layers[c.dataset.layer])));
+    $$('#layers [data-layer]').forEach((c) => c.addEventListener('click', () => setLayer(c.dataset.layer, !S.layers[c.dataset.layer])));
     $('#searchForm').addEventListener('submit', (e) => {
       e.preventDefault();
       const q = $('#searchInput').value.trim();
@@ -1753,13 +1891,18 @@
     });
     $('#btnNear').addEventListener('click', () => locate(false));
     $('#btnLocate').addEventListener('click', () => locate(true));
-    $('#btnHome').addEventListener('click', () => map.fitBounds(KOELN, { padding: isDesktop() ? { left: 440, top: 40, right: 40, bottom: 40 } : { top: 40, left: 20, right: 20, bottom: sheetVisibleHeight() + 10 }, duration: REDUCED ? 0 : 600 }));
+    $('#btnHome').addEventListener('click', () => map.fitBounds(KOELN, { padding: mapPad(isDesktop() ? 40 : 16), duration: REDUCED ? 0 : 600 }));
     $('#repoLink').href = S.cfg?.repo || '#';
     $('#scroll').addEventListener('scroll', (e) => e.target.classList.toggle('scrolled', e.target.scrollTop > 2), { passive: true });
     bindSettings();
 
     // timeline
-    $('#tlRange').addEventListener('input', (e) => { stopPlay(); setFrame(+e.target.value); });
+    let scrubRaf = 0;
+    $('#tlRange').addEventListener('input', (e) => {
+      stopPlay();
+      if (scrubRaf) return; // one render per frame, always with the newest position
+      scrubRaf = requestAnimationFrame(() => { scrubRaf = 0; setFrame(+$('#tlRange').value); });
+    });
     $('#tlPlay').addEventListener('click', () => (S.k.playing ? stopPlay() : startPlay()));
     $('#tlLive').addEventListener('click', goLive);
     $('#tlSpeed').addEventListener('click', () => {
@@ -1849,8 +1992,7 @@
     applyVisibility(); renderKarte(true); syncSettings(); updateStatus();
     requestAnimationFrame(() => {
       setSheet('peek');
-      map.fitBounds(view, { duration: 0, padding: isDesktop()
-        ? { left: 440, top: 30, right: 30, bottom: 30 } : { top: 20, left: 12, right: 12, bottom: sheetVisibleHeight() + 8 } });
+      map.fitBounds(view, { duration: 0, padding: mapPad(isDesktop() ? 30 : 10) });
     });
     reloadTimeline();
     if (S.layers.avail) computeOverlay(true);
@@ -1867,6 +2009,6 @@
     initMap(S.cfg);
   }
   window.__app = S; Object.defineProperty(window, '__map', { get: () => map });
-  window.__ui = { setSheet, showStation, showBike, showTlStation, showBikeHistory, pointQuery, flyTo, setFrame, startPlay, stopPlay, goLive, setLayer, openTrip, computeOverlay };
+  window.__ui = { pick, tripsAt, setSheet, showStation, showBike, showTlStation, showBikeHistory, pointQuery, flyTo, setFrame, startPlay, stopPlay, goLive, setLayer, openTrip, computeOverlay, renderTrips };
   start();
 })();
