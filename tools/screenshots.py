@@ -32,7 +32,7 @@ PLAY = "() => { const T = window.__app.tl; if (T) { window.__ui.setFrame(Math.ma
 AVAIL = "() => window.__ui.setLayer('avail', true)"
 FREQ = """() => { const b = document.querySelector('[data-set=\"color\"] [data-v=\"freq\"]'); b && b.click(); }"""
 TRIP = """() => { const A = window.__app; const t = A.trips && A.trips.filter((x) => x.e <= A.k.clock).pop(); if (t) window.__ui.openTrip({ k: t.k }); }"""
-PREP = "() => { localStorage.removeItem('kvb-ui-v1'); localStorage.removeItem('kvb-panel-v1'); }"
+PREP = "() => { localStorage.removeItem('kvb-ui-v1'); localStorage.removeItem('kvb-ui-v2'); localStorage.removeItem('kvb-panel-v1'); }"
 WIN3H = """() => { const b = document.querySelector('[data-set=\"win\"] [data-v=\"180\"]'); b && b.click(); }"""
 FULL = "() => window.__ui.setSheet('full')"
 WAIT = "() => new Promise((r) => setTimeout(r, 3000))"

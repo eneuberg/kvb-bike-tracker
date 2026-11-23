@@ -463,3 +463,35 @@ h3.group { margin: 24px 0 0; color: var(--ink); font-weight: 600; }
 .ctx .hint-l { color: var(--muted); font-size: 12.5px; }
 .rows.hist .val small { display: block; font: 400 12px var(--font); color: var(--muted); }
 .mini { border: 0; background: var(--surface-3); color: var(--ink); border-radius: 7px; padding: 5px 9px; font-size: 12.5px; flex: none; cursor: pointer; }
+
+/* ---------------------------------------------------------------- trips window under the timeline */
+.winrow { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.winrow[hidden] { display: none; }
+.winrow > span { font-size: 12.5px; color: var(--ink-2); white-space: nowrap; flex: none; }
+.seg.xs { flex: 1; padding: 2px; }
+.seg.xs button { min-height: 30px; padding: 0 6px; font-size: 13px; }
+@media (max-width: 370px) { .winrow > span { display: none; } }
+
+/* ---------------------------------------------------------------- settings sections */
+.sec { border-top: 1px solid var(--line); }
+.sec-h { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 56px; padding: 0; border: 0; background: none;
+  color: var(--ink); text-align: left; cursor: pointer; }
+.sec-t { font: 600 16.5px/1.2 var(--font); flex: none; }
+.sec-s { flex: 1; min-width: 0; font-size: 13px; color: var(--muted); text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sec-h .chev { width: 20px; height: 20px; flex: none; fill: none; stroke: var(--muted); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; transition: transform .2s; }
+.sec-h[aria-expanded="true"] .chev { transform: rotate(180deg); }
+.sec-h[aria-expanded="true"] .sec-s { visibility: hidden; }
+.sec-b { padding: 0 0 18px; }
+.sec-b > .row:first-child, .sec-b > .hint.top + .row { margin-top: 0; }
+.sec-b > .hint.top { margin: -2px 0 14px; }
+.sec .toggle { margin-top: 14px; }
+.sec.minor .sec-h { min-height: 48px; }
+.sec.minor .sec-t { font-size: 14.5px; font-weight: 500; color: var(--ink-2); }
+/* sliders with their value on the right */
+.srow h3 { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.srow h3 output { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+/* a clear break between groups of different kind */
+.gap { height: 10px; margin: 0 calc(-1 * var(--pad)); background: var(--surface-2); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.gap + .sec, .gap + .block, .group-label + .sec { border-top: 0; }
+.group-label { margin: 16px 0 0; font-size: 11.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+#panel.has-detail .winrow { display: none; }

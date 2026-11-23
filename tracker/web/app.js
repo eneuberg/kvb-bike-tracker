@@ -96,8 +96,8 @@
   const PIXEL = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 
   // ================================================================ state
-  const UI_KEY = 'kvb-ui-v1';
-  const DEFAULT_O = { win: 60, color: 'dir', away: true, metric: 'prob', R: 200, res: 25, days: 14, wd: 'all',
+  const UI_KEY = 'kvb-ui-v2'; // v2: new defaults (radius 100 m, 30 days, own time of day for availability)
+  const DEFAULT_O = { win: 60, color: 'dir', away: true, metric: 'prob', R: 100, res: 25, days: 30, tod: 30, wd: 'all',
     minGone: 100, jump: 300, maxDurH: 4 };
   function loadO() {
     try { const o = JSON.parse(localStorage.getItem(UI_KEY) || 'null'); if (o && typeof o === 'object') return { ...DEFAULT_O, ...o }; } catch { /* ignore */ }
@@ -595,7 +595,7 @@
     if (S.tl) S.tl.loaded = 0; // next timeline request reloads
     if (S.k.isLive || !S.tl) await reloadTimeline();
     if (S.layers.avail) computeOverlay(true);
-    if ($('#statsBox')?.open) renderStats();
+    if (secOpen('secStats')) renderStats();
     return true;
   }
   async function checkUpdate(manual) {
@@ -1417,18 +1417,19 @@
   // One overlay, three measures of the same thing: chance of a bike within R,
   // typical walk to the nearest bike, bikes per hectare. Basis: the time of day
   // of the trip window, over the last N days (and chosen weekdays).
-  const R_OPTS = [50, 100, 150, 200, 300, 400, 500];
+  const R_STEPS = [25, 50, 75, 100, 125, 150, 200, 250, 300, 400, 500]; // what the worker's histogram resolves exactly
   const WD_MASK = { all: [1, 1, 1, 1, 1, 1, 1], wk: [1, 1, 1, 1, 1, 0, 0], we: [0, 0, 0, 0, 0, 1, 1] };
   const WD_LABEL = { all: 'alle Tage', wk: 'Mo–Fr', we: 'Sa/So' };
   const fHM = new Intl.DateTimeFormat('de-DE', { hour: 'numeric', minute: 'numeric', hourCycle: 'h23', timeZone: TZ });
   const localMin = (t) => { const p = fHM.formatToParts(new Date(t * 1000)); return (+p.find((x) => x.type === 'hour').value % 24) * 60 + +p.find((x) => x.type === 'minute').value; };
   const shownTime = () => (S.k.isLive || !S.tl ? (S.live?.t || now()) : S.k.clock);
   function availBasis() {
+    // time of day around the shown moment (its own setting, not the trips window)
     const B = shownTime();
     let t0 = 0, t1 = 0, label = 'ganzer Tag';
-    if (S.o.win < 1440) {
-      const e = Math.ceil(localMin(B) / 15) * 15, w = Math.max(15, Math.round(S.o.win / 15) * 15);
-      t1 = e % 1440; t0 = (((e - w) % 1440) + 1440) % 1440;
+    if (S.o.tod > 0) {
+      const c = Math.round(localMin(B) / 15) * 15, w = S.o.tod;
+      t0 = (((c - w) % 1440) + 1440) % 1440; t1 = (c + w) % 1440;
       label = `${minToStr(t0)}–${t1 === 0 ? '24:00' : minToStr(t1)} Uhr`;
     }
     const idx = tlIndex || [];
@@ -1602,7 +1603,7 @@
   let statsSeq = 0;
   async function renderStats() {
     const box = $('#statsOut');
-    if (!box || !$('#statsBox').open) return;
+    if (!box || !secOpen('secStats')) return;
     box.innerHTML = '<span class="busy">rechnet</span>';
     try { await ensureIndex(); } catch { box.innerHTML = '<p class="hint">Noch kein Verlauf vorhanden.</p>'; return; }
     const to = lastDate(), from = addDays(to, -6);
@@ -1669,38 +1670,63 @@
       const k = inp.dataset.param;
       S.o[k] = +inp.value; saveO();
       $(`#${inp.id}-o`).textContent = FMT[k](inp.value);
+      $('#sumParams').textContent = `${S.o.minGone} m · ${S.o.jump} m · ${nf1.format(S.o.maxDurH)} Std.`;
       clearTimeout(t);
       t = setTimeout(() => { if (S.tl) loadTrips(S.tl); renderStats(); }, 350);
     }));
   }
+  const COLOR_LABEL = { dir: 'Start → Ziel', dur: 'Dauer', freq: 'Häufigkeit' };
+  const METRIC_LABEL = { prob: 'Chance', median: 'Laufweg', density: 'Räder/ha' };
+  const TOD_LABEL = { 30: '± 30 Min.', 60: '± 1 Std.', 180: '± 3 Std.', 0: 'ganzer Tag' };
+  const secOpen = (id) => $(`#${id} .sec-h`)?.getAttribute('aria-expanded') === 'true';
   function syncSettings() {
     for (const g of $$('[data-set]')) {
       const k = g.dataset.set;
-      if (k === 'R') {
-        g.innerHTML = R_OPTS.map((r) => `<button class="chip${S.o.R === r ? ' on' : ''}" data-v="${r}" aria-pressed="${S.o.R === r}">${r} m</button>`).join('');
-        continue;
-      }
       for (const b of $$('button', g)) b.setAttribute('aria-checked', String(String(S.o[k]) === b.dataset.v));
     }
+    const ri = R_STEPS.indexOf(S.o.R) >= 0 ? R_STEPS.indexOf(S.o.R) : 3;
+    $('#setR').value = ri; $('#setR-o').textContent = `${R_STEPS[ri]} m`;
+    $('#setDays').value = S.o.days; $('#setDays-o').textContent = `${S.o.days} Tage`;
+    // one-line summaries on the closed sections
+    $('#sumTrips').textContent = `Farbe: ${COLOR_LABEL[S.o.color]}`;
+    $('#sumAvail').textContent = [METRIC_LABEL[S.o.metric], S.o.metric === 'median' ? null : `${S.o.R} m`, TOD_LABEL[S.o.tod], `${S.o.days} Tage`].filter(Boolean).join(' · ');
+    $('#sumTl').textContent = $('#tlSpan [aria-checked="true"]')?.textContent.trim() || '';
+    $('#sumParams').textContent = `${S.o.minGone} m · ${S.o.jump} m · ${nf1.format(S.o.maxDurH)} Std.`;
+    $('#winRow').hidden = !S.layers.trips;
     $('#setAway').checked = !!S.o.away;
     $$('[data-hint-for]').forEach((el) => { el.hidden = el.dataset.hintFor !== S.o.color; });
     $('#rowR').hidden = S.o.metric === 'median';
     $('#resHint').textContent = S.o.res < 25 ? '10 m rechnet nur den sichtbaren Ausschnitt und weniger Abfragen; genauer als etwa 25 m sind die Daten nicht.' : '';
     renderCtx();
   }
+  const availChanged = () => { if (!S.layers.avail) setLayer('avail', true); else computeOverlay(true); };
   function bindSettings() {
-    $('#more').addEventListener('click', (e) => {
+    // segmented settings, in the sections and under the timeline
+    $('#panel').addEventListener('click', (e) => {
       const b = e.target.closest('[data-set] button'); if (!b) return;
       const k = b.closest('[data-set]').dataset.set, v = b.dataset.v;
-      S.o[k] = ['win', 'R', 'res', 'days'].includes(k) ? +v : v;
+      S.o[k] = ['win', 'res', 'tod'].includes(k) ? +v : v;
       saveO(); syncSettings();
-      if (k === 'win') { renderTrips(S.k.clock); scheduleOverlay(0); }
+      if (k === 'win') renderTrips(S.k.clock); // trips only; availability has its own time of day
       else if (k === 'color') { applyVisibility(); renderTrips(S.k.clock); }
-      else { if (!S.layers.avail) setLayer('avail', true); else computeOverlay(true); }
+      else availChanged();
     });
+    // sliders: label follows while dragging, the map is recomputed when you let go
+    $('#setR').addEventListener('input', (e) => { S.o.R = R_STEPS[+e.target.value]; $('#setR-o').textContent = `${S.o.R} m`; });
+    $('#setDays').addEventListener('input', (e) => { S.o.days = +e.target.value; $('#setDays-o').textContent = `${S.o.days} Tage`; });
+    for (const id of ['#setR', '#setDays']) $(id).addEventListener('change', () => { saveO(); syncSettings(); availChanged(); });
     $('#setAway').addEventListener('change', (e) => { S.o.away = e.target.checked; saveO(); renderTrips(S.k.clock); });
-    $('#statsBox').addEventListener('toggle', () => { if ($('#statsBox').open) renderStats(); });
-    $('#tripParams').addEventListener('toggle', () => { if ($('#tripParams').open) renderTripParams(); });
+    // sections open and close; Statistik and Fahrt-Erkennung are built when opened
+    $$('.sec-h').forEach((h) => h.addEventListener('click', () => {
+      const open = h.getAttribute('aria-expanded') !== 'true';
+      h.setAttribute('aria-expanded', String(open));
+      h.nextElementSibling.hidden = !open;
+      const id = h.parentElement.id;
+      if (open && id === 'secStats') renderStats();
+      if (open && id === 'secParams') renderTripParams();
+      if (open && !isDesktop() && (sheetState === 'peek' || sheetState === 'mini')) setSheet('half');
+      if (open) requestAnimationFrame(() => revealEl(h.parentElement));
+    }));
   }
   function setLayer(k, on) {
     S.layers[k] = on;
@@ -1710,6 +1736,7 @@
       if (on) computeOverlay(true);
       else { clearRaster(); ovInfo = null; S.sel = S.sel?.type === 'point' ? null : S.sel; setData('qpt', EMPTY); }
     }
+    $('#winRow').hidden = !S.layers.trips;
     applyVisibility(); renderTrips(S.k.clock); renderCtx();
   }
 
@@ -1937,6 +1964,7 @@
     $$('#tlSpan button').forEach((b) => b.addEventListener('click', () => {
       S.k.span = +b.dataset.h;
       $$('#tlSpan button').forEach((x) => x.setAttribute('aria-checked', String(x === b)));
+      $('#sumTl').textContent = b.textContent.trim();
       reloadTimeline();
     }));
     $('#tlEnd').addEventListener('change', (e) => { S.k.end = e.target.value || null; reloadTimeline(); });
