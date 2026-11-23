@@ -65,6 +65,7 @@
             <button class="livebtn" id="tlLive" type="button" aria-pressed="true"><span class="dot"></span>Live</button>
           </div>
           <div class="track">
+            <div class="todband" id="tlTod" hidden></div>
             <div class="winband" id="tlWin" hidden></div>
             <svg id="tlSpark" class="spark" preserveAspectRatio="none" aria-hidden="true"></svg>
             <input type="range" id="tlRange" min="0" max="0" value="0" step="1" aria-label="Zeitpunkt" disabled>
@@ -75,6 +76,11 @@
             <div class="seg xs" role="radiogroup" aria-label="Fahrten im Zeitraum vor dem gezeigten Zeitpunkt" data-set="win">
               <button role="radio" data-v="15">15 Min.</button><button role="radio" data-v="60">1 Std.</button>
               <button role="radio" data-v="180">3 Std.</button><button role="radio" data-v="1440">24 Std.</button></div></div>
+          <!-- availability: typical value around this time of day (its own setting) -->
+          <div class="winrow" id="todRow" hidden><span><i class="wb av"></i>Verfügbarkeit um</span>
+            <div class="seg xs" role="radiogroup" aria-label="Verfügbarkeit: Uhrzeit um den gezeigten Zeitpunkt" data-set="tod">
+              <button role="radio" data-v="30">±30 Min.</button><button role="radio" data-v="60">±1 Std.</button>
+              <button role="radio" data-v="180">±3 Std.</button><button role="radio" data-v="0">Tag</button></div></div>
         </div>
         <!-- numbers and layer switches in one: tap a tile to show or hide it on the map -->
         <div class="ltiles" id="layers" role="group" aria-label="Auf der Karte zeigen">
@@ -112,15 +118,12 @@
         <section class="sec set" id="secAvail">
           <button class="sec-h" type="button" aria-expanded="false"><span class="sec-t">Verfügbarkeit</span><span class="sec-s" id="sumAvail"></span><svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
           <div class="sec-b" hidden>
-            <p class="hint top">Wie gut man an einem Ort ein Rad findet: typischer Wert um die Uhrzeit des gezeigten Zeitpunkts, gemittelt über mehrere Tage. Unabhängig vom Fahrten-Zeitfenster.</p>
+            <p class="hint top">Wie gut man an einem Ort ein Rad findet: typischer Wert um die Uhrzeit des gezeigten Zeitpunkts, gemittelt über mehrere Tage. Die Uhrzeit-Spanne stellst du unter der Zeitleiste ein, unabhängig von den Fahrten.</p>
             <div class="row"><h3>Messgröße</h3>
               <div class="seg sm" role="radiogroup" data-set="metric">
                 <button role="radio" data-v="prob">Chance</button><button role="radio" data-v="median">Laufweg</button><button role="radio" data-v="density">Räder/ha</button></div></div>
             <div class="row srow" id="rowR"><h3><label for="setR">Umkreis</label><output id="setR-o"></output></h3>
               <input class="slider" type="range" id="setR" min="0" max="10" step="1"></div>
-            <div class="row"><h3>Uhrzeit</h3>
-              <div class="seg sm" role="radiogroup" data-set="tod">
-                <button role="radio" data-v="30">± 30 Min.</button><button role="radio" data-v="60">± 1 Std.</button><button role="radio" data-v="180">± 3 Std.</button><button role="radio" data-v="0">ganzer Tag</button></div></div>
             <div class="row srow"><h3><label for="setDays">Über wie viele Tage</label><output id="setDays-o"></output></h3>
               <input class="slider" type="range" id="setDays" min="3" max="56" step="1"></div>
             <div class="row"><h3>Wochentage</h3>

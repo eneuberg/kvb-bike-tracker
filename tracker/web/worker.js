@@ -366,7 +366,9 @@ function stationProfile({ F, dates, uid, k }) {
 const TS = 11;
 let tripCache = { key: '', res: null };
 function inferTrips(dates, P) {
-  const key = `${dates.join(',')}|${P.minGone}|${P.jump}|${P.maxDur}`;
+  const key = `${dates.join(',')}|${P.minGone}|${P.jump}|${P.maxDur}|${P.maxKmh}`;
+  // faster than this on average, even over the longest possible time, is a GPS glitch, not a transport
+  const tooFast = (d, secs) => (d / Math.max(60, secs)) * 3.6 > (P.maxKmh || 200);
   if (tripCache.key === key) return tripCache.res;
   const N = G.bikeIds.length;
   const prevP = new Uint8Array(N), prevLat = new Float64Array(N), prevLng = new Float64Array(N);
@@ -374,7 +376,7 @@ function inferTrips(dates, P) {
   const prevSt = new Int32Array(N).fill(-1), oSt = new Int32Array(N).fill(-1);
   const trips = [];
   const pollT = [], pollTotal = [];
-  let prevT = null, service = 0, round = 0, unclear = 0;
+  let prevT = null, service = 0, round = 0, unclear = 0, glitch = 0;
   // when two polls are far apart (missed runs) we cannot say when a trip
   // happened; such trips are left out instead of being piled into the gap
   const MAX_GAP = 3600;
@@ -388,7 +390,7 @@ function inferTrips(dates, P) {
         const was = prevP[b];
         if (was && now) {
           const d = dist(prevLat[b], prevLng[b], S.lat[b], S.lng[b]);
-          if (d > P.jump) { if (t - prevT > MAX_GAP) unclear++; else trips.push(prevT, t, prevLat[b], prevLng[b], S.lat[b], S.lng[b], d, 1, b, prevSt[b], S.pl[b]); }
+          if (d > P.jump) { if (t - prevT > MAX_GAP) unclear++; else if (tooFast(d, t - prevT)) glitch++; else trips.push(prevT, t, prevLat[b], prevLng[b], S.lat[b], S.lng[b], d, 1, b, prevSt[b], S.pl[b]); }
         } else if (was && !now) {
           open[b] = 1; oT0[b] = prevT; oT1[b] = t; oLat[b] = prevLat[b]; oLng[b] = prevLng[b]; oSt[b] = prevSt[b];
         } else if (!was && now && open[b]) {
@@ -397,6 +399,7 @@ function inferTrips(dates, P) {
           if (en - st > P.maxDur) service++;
           else if (oT1[b] - oT0[b] > MAX_GAP || t - prevT > MAX_GAP) unclear++;
           else if (d < P.minGone) round++;
+          else if (tooFast(d, t - oT0[b])) glitch++;
           else trips.push(st, en, oLat[b], oLng[b], S.lat[b], S.lng[b], d, 0, b, oSt[b], S.pl[b]);
         }
       }
@@ -424,7 +427,7 @@ function inferTrips(dates, P) {
     while (ei < ends.length && ends[ei] <= t) ei++;
     inuse[k] = Math.max(0, si - ei);
   }
-  const res = { trips: Float64Array.from(trips), pollT, pollTotal, inuse, service, round, unclear, openNow };
+  const res = { trips: Float64Array.from(trips), pollT, pollTotal, inuse, service, round, unclear, glitch, openNow };
   tripCache = { key, res };
   return res;
 }
@@ -464,7 +467,7 @@ function usage({ F, dates, P }) {
   for (let k = 0; k < R.pollT.length; k += step) { ser.t.push(R.pollT[k]); ser.inuse.push(R.inuse[k]); ser.total.push(R.pollTotal[k]); }
   return {
     ...pollStats(F, dates),
-    count, short, service: R.service, round: R.round, unclear: R.unclear,
+    count, short, service: R.service, round: R.round, unclear: R.unclear, glitch: R.glitch,
     perDay: daysSel.size ? count / daysSel.size : null, days: daysSel.size,
     medDur: med(durs), medDist: med(dists),
     durH: Array.from(durH), distH: Array.from(distH),
@@ -1034,7 +1037,9 @@ async function bikeTrail({ bike, t0, t1, P }) {
     const d = Math.hypot((z.lat - a.lat) * M_LAT, (z.lng - a.lng) * M_LNG);
     const absent = z.gapFrom != null;
     // a trip: the bike left the feed (rented) or moved clearly; else GPS drift or a nudge
-    const kind = absent || d >= P.minGone ? 'trip' : 'shift';
+    // longest possible time between the two places: last seen there, first seen here
+    const glitch = d >= P.minGone && (d / Math.max(60, z.t0 - a.t1)) * 3.6 > (P.maxKmh || 200);
+    const kind = glitch ? 'glitch' : absent || d >= P.minGone ? 'trip' : 'shift';
     const r = kind === 'trip' && g ? route(g, a.lat, a.lng, z.lat, z.lng) : null;
     moves.push({ from: i - 1, to: i, t0: a.t1, t1: z.t0, d: Math.round(d), absent, kind,
       service: absent && z.t0 - a.t1 > P.maxDur, route: r ? r.c : null, len: r ? r.len : null });

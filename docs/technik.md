@@ -58,7 +58,7 @@ Ein Feed ist rund 70 KB (gzip) bzw. 1,2 MB JSON; der Verlauf wächst um wenige K
 ## Methode und Grenzen
 
 - **Keine echten Ausleihzeiten:** Weder der Live-Feed noch GBFS haben Zeitstempel pro Rad (geprüft mit `probe.yml`). GBFS rotiert außerdem die Rad-IDs. Zeiten sind daher nur so genau wie das Abfrageintervall.
-- **Fahrten sind abgeleitet:** Ein Rad verschwindet und taucht mindestens 100 m entfernt wieder auf (Abwesenheit über 4 h gilt als Werkstatt) oder springt über 300 m zwischen zwei Abfragen. Lücken über 1 h werden nicht gezählt. Umsetzen per Transporter lässt sich nicht sicher trennen.
+- **Fahrten sind abgeleitet:** Ein Rad verschwindet und taucht mindestens 100 m entfernt wieder auf (Abwesenheit über 4 h gilt als Werkstatt) oder springt über 300 m zwischen zwei Abfragen. Lücken über 1 h werden nicht gezählt. Schneller als 200 km/h, gerechnet mit der längstmöglichen Dauer (zuletzt dort gesehen → zuerst hier gesehen), gilt als GPS-Fehler; Zugfahrten mit Rad bleiben damit drin. Umsetzen per Transporter lässt sich nicht sicher trennen.
 - **Routen sind geschätzt:** `tools/build_graph.py` baut monatlich (`graph.yml`) ein Radnetz aus OpenStreetMap. Radwege werden bevorzugt, Hauptstraßen, schlechter Belag und Schieben bestraft, Einbahnstraßen beachtet. Der Browser rechnet A\* in einem Web Worker (~1 ms pro Route). Das ist der plausibelste Weg, nicht der tatsächlich gefahrene.
 - **Verfügbarkeit:** pro Abfrage exakte euklidische Distanztransformation, gemittelt über die gewählten Tage zur gleichen Tageszeit (Europe/Berlin, Feiertage zählen als Werktage).
 - **Quelle:** `api.nextbike.net/maps/nextbike-live.json` ist öffentlich, aber undokumentiert und kann sich ändern.

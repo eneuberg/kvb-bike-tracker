@@ -98,7 +98,7 @@
   // ================================================================ state
   const UI_KEY = 'kvb-ui-v2'; // v2: new defaults (radius 100 m, 30 days, own time of day for availability)
   const DEFAULT_O = { win: 60, color: 'dir', away: true, metric: 'prob', R: 100, res: 25, days: 30, tod: 30, wd: 'all',
-    minGone: 100, jump: 300, maxDurH: 4 };
+    minGone: 100, jump: 300, maxDurH: 4, maxKmh: 200 };
   function loadO() {
     try { const o = JSON.parse(localStorage.getItem(UI_KEY) || 'null'); if (o && typeof o === 'object') return { ...DEFAULT_O, ...o }; } catch { /* ignore */ }
     return { ...DEFAULT_O };
@@ -110,7 +110,7 @@
     k: { span: 24, end: null, isLive: true, frame: -1, clock: 0, playing: false, speed: 1, liveInuse: null },
     layers: { stations: true, free: true, trips: true, avail: false },
   };
-  const tripParams = () => ({ minGone: S.o.minGone, jump: S.o.jump, maxDur: S.o.maxDurH * 3600 });
+  const tripParams = () => ({ minGone: S.o.minGone, jump: S.o.jump, maxDur: S.o.maxDurH * 3600, maxKmh: S.o.maxKmh });
 
   // ================================================================ map
   let map, styleReady = false, hasGlyphs = false;
@@ -808,14 +808,22 @@
   }
 
   // the trips window drawn on the timeline: a band that ends at the thumb
+  // and the availability's time of day: a band around the thumb
   function updateWinBand() {
-    const el = $('#tlWin'); if (!el) return;
+    const el = $('#tlWin'), av = $('#tlTod'); if (!el) return;
     const { ts, te } = S.k, span = te - ts;
-    if (!S.tl || !S.layers.trips || !(span > 0)) { el.hidden = true; return; }
-    const t1 = S.k.isLive ? te : S.k.clock, t0 = Math.max(ts, t1 - S.o.win * 60);
-    el.hidden = false;
-    el.style.setProperty('--a', ((t0 - ts) / span).toFixed(4));
-    el.style.setProperty('--w', (Math.max(0, t1 - t0) / span).toFixed(4));
+    const put = (node, t0, t1) => {
+      t0 = Math.max(ts, t0); t1 = Math.min(te, t1);
+      node.hidden = !(t1 > t0);
+      node.style.setProperty('--a', ((t0 - ts) / span).toFixed(4));
+      node.style.setProperty('--w', (Math.max(0, t1 - t0) / span).toFixed(4));
+    };
+    const now = S.k.isLive ? te : S.k.clock;
+    if (!S.tl || !S.layers.trips || !(span > 0)) el.hidden = true;
+    else put(el, now - S.o.win * 60, now);
+    if (!S.tl || !S.layers.avail || !(span > 0)) av.hidden = true;
+    else if (S.o.tod > 0) put(av, now - S.o.tod * 60, now + S.o.tod * 60);
+    else { const d0 = now - localMin(now) * 60; put(av, d0, d0 + 86400); }
   }
   function setClock(t, live) {
     updateWinBand();
@@ -1298,6 +1306,7 @@
       }
       const a = H.type === 'bike' ? H.items[n - 1] : null, b = H.type === 'bike' ? H.items[n + 1] : null;
       const s0 = a ? [a.lng, a.lat] : it.a, s1 = b ? [b.lng, b.lat] : it.b;
+      if (it.kind === 'glitch') return; // no line for a GPS jump
       if (it.kind === 'shift') { f.push(ln([s0, s1], { kind: 'shift', ...flags(n) })); return; }
       const c = it.route || [s0, s1];
       f.push(ln(c, { kind: it.route ? 'route' : 'air', ...flags(n) }));
@@ -1351,6 +1360,10 @@
           <span class="ic route"></span>
           <span class="main"><b>${it.service ? 'Lange weg (Werkstatt oder Umverteilung?)' : 'Fahrt'}</b><small>${tm(it.t0)} → ${tm(it.t1)} · ${it.len ? `~${fmtDist(it.len)} Weg` : `${fmtDist(it.d)} Luftlinie`}</small></span>
           <span class="val"${it.absent ? '' : ' title="Zwischen zwei Abfragen bewegt, ohne aus dem Feed zu verschwinden: höchstens so lange"'}>${it.absent ? fmtDur(Math.max(60, dur)) : `≤ ${fmtDur(Math.max(60, dur))}`}</span></button></li>`);
+      } else if (it.kind === 'glitch') {
+        const dur = Math.max(60, it.t1 - it.t0);
+        rows.push(`<li class="hrow shift" data-n="${n}"><button class="rowbtn" data-act="hfocus" data-n="${n}"><span class="ic shift"></span>
+          <span class="main"><small>Messfehler: Sprung um ${fmtDist(it.d)} in ≤ ${fmtDur(dur)} (mind. ${nf.format(Math.round((it.d / dur) * 3.6))} km/h), keine Fahrt</small></span></button></li>`);
       } else {
         rows.push(`<li class="hrow shift" data-n="${n}"><button class="rowbtn" data-act="hfocus" data-n="${n}"><span class="ic shift"></span>
           <span class="main"><small>um ${fmtDist(it.d)} versetzt (GPS-Ungenauigkeit oder kurz verschoben)</small></span></button></li>`);
@@ -1681,7 +1694,7 @@
       ${barChart({ title: 'Strecke (Luftlinie)', sub: `${nf.format(r.count)} Fahrten`, values: dist,
         labels: dist.map((_, k) => (k === dist.length - 1 ? 'über 8 km' : `${nf1.format(k * 0.25)}–${nf1.format(k * 0.25 + 0.25)} km`)), tickEvery: 4, tickLabel: (k) => (k === dist.length - 1 ? '' : nf1.format(k * 0.25)), unitX: 'km' })}
       ${idle.length ? survivalChart(idle) : ''}
-      <p class="hint">Nicht als Fahrt gezählt: ${nf.format(r.service)} Abwesenheiten über ${nf1.format(S.o.maxDurH)} Std., ${nf.format(r.round)} Rückkehren an denselben Ort${r.unclear ? ` und ${nf.format(r.unclear)} Bewegungen über eine Abfragelücke von mehr als einer Stunde` : ''}.</p>`;
+      <p class="hint">Nicht als Fahrt gezählt: ${nf.format(r.service)} Abwesenheiten über ${nf1.format(S.o.maxDurH)} Std., ${nf.format(r.round)} Rückkehren an denselben Ort${r.unclear ? `, ${nf.format(r.unclear)} Bewegungen über eine Abfragelücke von mehr als einer Stunde` : ''}${r.glitch ? ` und ${nf.format(r.glitch)} Sprünge schneller als ${nf.format(S.o.maxKmh)} km/h (GPS-Fehler)` : ''}.</p>`;
     bindCharts(box);
   }
 
@@ -1708,7 +1721,7 @@
   }
 
   // ================================================================ settings
-  const FMT = { minGone: (v) => `${v} m`, jump: (v) => `${v} m`, maxDurH: (v) => `${nf1.format(v)} Std.` };
+  const FMT = { minGone: (v) => `${v} m`, jump: (v) => `${v} m`, maxDurH: (v) => `${nf1.format(v)} Std.`, maxKmh: (v) => `${v} km/h` };
   function slider(id, label, min, max, step, val, fmt) {
     return `<div class="row"><h3><label for="${id}">${label}</label><output id="${id}-o">${fmt(val)}</output></h3>
       <input class="slider" type="range" id="${id}" min="${min}" max="${max}" step="${step}" value="${val}" data-param="${id.replace('p-', '')}"></div>`;
@@ -1718,14 +1731,15 @@
     $('#tripParamsOut').innerHTML = `<div class="filters">
       ${slider('p-minGone', 'Rad verschwindet und taucht mindestens so weit entfernt wieder auf', 50, 1000, 50, o.minGone, FMT.minGone)}
       ${slider('p-jump', 'oder springt zwischen zwei Abfragen weiter als', 100, 2000, 100, o.jump, FMT.jump)}
-      ${slider('p-maxDurH', 'Länger weg = Werkstatt oder Umverteilung', 0.5, 12, 0.5, o.maxDurH, FMT.maxDurH)}</div>
+      ${slider('p-maxDurH', 'Länger weg = Werkstatt oder Umverteilung', 0.5, 12, 0.5, o.maxDurH, FMT.maxDurH)}
+      ${slider('p-maxKmh', 'Schneller als das = GPS-Fehler (gerechnet mit der längstmöglichen Dauer)', 50, 500, 10, o.maxKmh, FMT.maxKmh)}</div>
       <p class="hint">Bewegungen über eine Abfragelücke von mehr als einer Stunde werden nie gezählt, weil der Zeitpunkt unklar ist.</p>`;
     let t = 0;
     $$('#tripParamsOut input[data-param]').forEach((inp) => inp.addEventListener('input', () => {
       const k = inp.dataset.param;
       S.o[k] = +inp.value; saveO();
       $(`#${inp.id}-o`).textContent = FMT[k](inp.value);
-      $('#sumParams').textContent = `${S.o.minGone} m · ${S.o.jump} m · ${nf1.format(S.o.maxDurH)} Std.`;
+      $('#sumParams').textContent = `${S.o.minGone} m · ${S.o.jump} m · ${nf1.format(S.o.maxDurH)} Std. · ${S.o.maxKmh} km/h`;
       clearTimeout(t);
       t = setTimeout(() => { if (S.tl) loadTrips(S.tl); renderStats(); }, 350);
     }));
@@ -1746,8 +1760,9 @@
     $('#sumTrips').textContent = `Farbe: ${COLOR_LABEL[S.o.color]}`;
     $('#sumAvail').textContent = [METRIC_LABEL[S.o.metric], S.o.metric === 'median' ? null : `${S.o.R} m`, TOD_LABEL[S.o.tod], `${S.o.days} Tage`].filter(Boolean).join(' · ');
     $('#sumTl').textContent = $('#tlSpan [aria-checked="true"]')?.textContent.trim() || '';
-    $('#sumParams').textContent = `${S.o.minGone} m · ${S.o.jump} m · ${nf1.format(S.o.maxDurH)} Std.`;
+    $('#sumParams').textContent = `${S.o.minGone} m · ${S.o.jump} m · ${nf1.format(S.o.maxDurH)} Std. · ${S.o.maxKmh} km/h`;
     $('#winRow').hidden = !S.layers.trips;
+    $('#todRow').hidden = !S.layers.avail;
     $('#setAway').checked = !!S.o.away;
     $$('[data-hint-for]').forEach((el) => { el.hidden = el.dataset.hintFor !== S.o.color; });
     $('#rowR').hidden = S.o.metric === 'median';
@@ -1764,7 +1779,7 @@
       saveO(); syncSettings();
       if (k === 'win') { renderTrips(S.k.clock); updateWinBand(); } // trips only; availability has its own time of day
       else if (k === 'color') { applyVisibility(); renderTrips(S.k.clock); }
-      else availChanged();
+      else { availChanged(); updateWinBand(); }
     });
     // sliders: label follows while dragging, the map is recomputed when you let go
     $('#setR').addEventListener('input', (e) => { S.o.R = R_STEPS[+e.target.value]; $('#setR-o').textContent = `${S.o.R} m`; });
@@ -1792,6 +1807,7 @@
       else { clearRaster(); ovInfo = null; S.sel = S.sel?.type === 'point' ? null : S.sel; setData('qpt', EMPTY); }
     }
     $('#winRow').hidden = !S.layers.trips;
+    $('#todRow').hidden = !S.layers.avail;
     updateWinBand();
     applyVisibility(); renderTrips(S.k.clock); renderCtx();
   }
