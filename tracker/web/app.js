@@ -194,9 +194,15 @@
       paint: { 'fill-color': hexA(C.ink, 0.06) } }, before);
 
     // trips under everything else: one line per street section, thicker = more trips
+    map.addLayer({ id: 'trips-glow', type: 'line', source: 'trips', filter: ['>=', ['get', 'w'], 5], layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-width': ['interpolate', ['linear'], ['zoom'], 10, ['*', 2.2, ['get', 'w']], 16, ['*', 5, ['get', 'w']]],
+        'line-blur': ['interpolate', ['linear'], ['zoom'], 10, 4, 16, 10], 'line-color': ['to-color', ['get', 'col']],
+        'line-opacity': ['interpolate', ['linear'], ['get', 'w'], 5, DARK ? 0.12 : 0.08, 8, DARK ? 0.32 : 0.2] } });
     map.addLayer({ id: 'trips-line', type: 'line', source: 'trips', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round', 'line-sort-key': ['get', 'w'] },
       paint: { 'line-width': ['interpolate', ['linear'], ['zoom'], 10, ['+', 0.9, ['*', 0.5, ['get', 'w']]], 13, ['+', 1.4, ['*', 0.95, ['get', 'w']]], 16, ['+', 2, ['*', 1.7, ['get', 'w']]]],
-        'line-color': ['to-color', ['get', 'col']] } }); // opaque: no darker beads where sections meet
+        'line-color': ['to-color', ['get', 'col']],
+        // few trips: see-through, many: solid
+        'line-opacity': ['interpolate', ['linear'], ['get', 'w'], 0, 0.42, W_CLS - 1, 1] } });
     map.addLayer({ id: 'trips-pt', type: 'circle', source: 'tripdots', layout: { visibility: 'none' },
       paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, ['*', ['get', 'r'], 0.5], 16, ['get', 'r']],
         'circle-color': ['to-color', ['get', 'fill']], 'circle-stroke-color': ['to-color', ['get', 'stroke']], 'circle-stroke-width': ['get', 'sw'],
@@ -272,7 +278,7 @@
     vis('stations-c', L.stations); vis('stations-t', L.stations);
     vis('free-dots', L.free);
     // while one bike's or station's history is open, everything else steps back
-    vis('trips-line', L.trips && !h);
+    vis('trips-line', L.trips && !h); vis('trips-glow', L.trips && !h);
     vis('trips-pt', L.trips && !h);
     map.setPaintProperty('free-dots', 'circle-opacity', h ? 0.25 : 1); map.setPaintProperty('free-dots', 'circle-stroke-opacity', h ? 0.25 : 1);
     map.setPaintProperty('stations-c', 'circle-opacity', h ? 0.3 : 1); map.setPaintProperty('stations-c', 'circle-stroke-opacity', h ? 0.3 : 1);
@@ -909,6 +915,25 @@
     return mix(R.freq[i], R.freq[i + 1], f - i);
   }));
   const wCls = (n) => Math.min(W_CLS - 1, Math.floor(Math.log2(Math.max(1, n))));
+  // Strava-like: thickness and brightness relative to the busiest section in
+  // the window (log scale), so a 24 h window does not paint the whole centre
+  // thick; few trips = thin and see-through, the busiest = bright with a glow.
+  // Capped for small counts, so 3 trips never look like a main axis.
+  const intensity = (n, maxN) => (maxN > 1 ? Math.log(n) / Math.log(maxN) : 0);
+  const wOf = (n, maxN) => Math.min(W_CLS - 1, Math.round(intensity(n, maxN) * (W_CLS - 1)), 2 * wCls(n) + 1);
+  const GLOW = DARK ? { to: '#ffffff', k: [0, 0.3, 0.55, 0.8] } : { to: null, k: [0, 0.25, 0.42, 0.6] };
+  const glowCache = new Map();
+  function glowCol(col, f) {
+    const q = f < 0.6 ? 0 : Math.min(3, 1 + Math.floor(((f - 0.6) / 0.4) * 3));
+    if (!q) return col;
+    const key = `${col}|${q}`;
+    let v = glowCache.get(key);
+    if (!v) glowCache.set(key, v = mixAny(col, GLOW.to || C.ink, GLOW.k[q]));
+    return v;
+  }
+  // mix for '#rrggbb' or 'rgb(r,g,b)'
+  const toRgb = (c) => (c.startsWith('rgb') ? c.match(/\d+/g).slice(0, 3).map(Number) : rgb(c));
+  const mixAny = (c1, c2, f) => { const a = toRgb(c1), b = toRgb(c2); return `rgb(${a.map((x, i) => Math.round(x + (b[i] - x) * f)).join(',')})`; };
   const EDGE = new Map(); // street section -> coordinates, fetched from the worker once
   let edgeBusy = false;
   async function fetchEdges(ids) {
@@ -993,10 +1018,10 @@
     for (const [e, a] of agg) {
       const g = EDGE.get(e);
       if (!g) { missing.push(e); continue; }
-      const n = a[0];
+      const n = a[0], f = intensity(n, maxN);
       const col = freq ? fc[Math.min(DIR_STEPS - 1, Math.floor((Math.log(n + 1) / lmax) * DIR_STEPS))]
         : dir ? cols[Math.min(DIR_STEPS - 1, Math.floor((a[1] / n) * DIR_STEPS))] : C.dur[durClass(a[2] / n)];
-      addL(col, wCls(n), g);
+      addL(glowCol(col, f), wOf(n, maxN), g);
     }
     tripMax = agg.size ? maxN : 0;
     const away = [];
@@ -1560,8 +1585,9 @@
   // line thickness by trips per street section: three samples up to the current maximum
   function widthLegend() {
     if (tripMax < 2) return '';
-    const top = wCls(tripMax), ns = [...new Set([0, Math.round(top / 2), top])].map((w) => 2 ** w);
-    return `<div class="wleg"><span>Dicke</span>${ns.map((n) => `<i style="height:${(1.4 + 0.95 * wCls(n)).toFixed(1)}px"></i><b>${nf.format(n)}</b>`).join('')}<span>Fahrten</span></div>`;
+    const ns = [...new Set([1, Math.round(Math.sqrt(tripMax)), tripMax])];
+    return `<div class="wleg"><span>Dicke</span>${ns.map((n) => { const w = wOf(n, tripMax);
+      return `<i style="height:${(1.4 + 0.95 * w).toFixed(1)}px;opacity:${(0.4 + 0.6 * (w / (W_CLS - 1))).toFixed(2)}"></i><b>${nf.format(n)}</b>`; }).join('')}<span>Fahrten</span></div>`;
   }
   function tripLegend() {
     if (S.o.color === 'dir') return `<div class="tleg"><span>Start</span><i class="stop s"></i><div class="grad"></div><i class="stop e"></i><span>Ziel</span></div>${widthLegend()}`;
