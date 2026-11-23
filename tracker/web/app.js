@@ -2087,6 +2087,11 @@
       else if (a === 'clearpoint') { S.sel = null; setData('qpt', EMPTY); applyVisibility(); closeDetail(); }
     });
     $('#near').addEventListener('click', (e) => { if (e.target.id === 'btnNear2') locate(false); });
+    // short how-to: "?" in the panel header
+    const help = $('#help');
+    $('#btnHelp').addEventListener('click', (e) => { e.stopPropagation(); if (help.showModal) help.showModal(); else help.setAttribute('open', ''); });
+    $('#helpClose').addEventListener('click', () => help.close ? help.close() : help.removeAttribute('open'));
+    help.addEventListener('click', (e) => { if (e.target === help) help.close(); }); // tap outside closes
 
     setInterval(updateStatus, 30000);
     // look for new data every minute while the page is visible, and right away when you come back

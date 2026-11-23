@@ -48,6 +48,8 @@
         <p id="status" class="status"><span class="pulse" aria-hidden="true"></span><span id="statusText">lädt …</span></p>
       </div>
     </div>
+    <button class="hbtn help" id="btnHelp" type="button" aria-label="Kurzanleitung" aria-haspopup="dialog" title="Kurzanleitung">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.2-2.4 3.6"/><circle cx="12" cy="17" r=".6" fill="currentColor"/></svg></button>
     <button class="hbtn" id="btnCollapse" type="button" aria-label="Fenster ein- oder ausklappen" aria-expanded="true">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></button>
   </header>
@@ -200,6 +202,19 @@
   </div>
   <div class="resize" id="resize" aria-hidden="true"></div>
 </aside>
+
+<dialog class="help" id="help" aria-labelledby="helpTitle">
+  <div class="help-head"><h2 id="helpTitle">So funktioniert's</h2>
+    <button class="hbtn" type="button" id="helpClose" aria-label="Schließen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+  <ul>
+    <li><b>Zeitleiste:</b> Knopf ziehen wählt den Zeitpunkt, ▶ spielt ab, „Live“ springt zu jetzt.</li>
+    <li><b>Kacheln</b> antippen blendet Stationen, freie Räder, Fahrten und Verfügbarkeit ein oder aus.</li>
+    <li><b>Fahrten:</b> geschätzte Wege im Zeitraum vor dem Zeitpunkt (<i class="hb win"></i> blaues Band). Dicker = mehr Fahrten, Rot = Start, Blau = Ziel.</li>
+    <li><b>Verfügbarkeit:</b> wie wahrscheinlich in der Nähe ein Rad steht, typisch um diese Uhrzeit (<i class="hb tod"></i> türkises Band), gemittelt über mehrere Tage.</li>
+    <li><b>Antippen</b> von Rad, Station, Linie oder Ort zeigt Details und Verlauf.</li>
+  </ul>
+  <p>Fahrten sind geschätzt: Der Feed zeigt nur abgestellte Räder. Verschwindet eins und taucht woanders auf, zählt das als Fahrt.</p>
+</dialog>
 
 <div class="tip" id="tip" role="tooltip" hidden></div>
 <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
