@@ -91,13 +91,14 @@
           <div class="row"><h3>Farbe</h3>
             <div class="seg sm" role="radiogroup" data-set="color">
               <button role="radio" data-v="dir">Start → Ziel</button><button role="radio" data-v="dur">Dauer</button><button role="radio" data-v="freq">Häufigkeit</button></div>
-            <p class="hint" data-hint-for="dir">Jede Fahrt läuft von Rot (Start) nach Blau (Ziel).</p>
-            <p class="hint" data-hint-for="dur">Die Farbe zeigt, wie lange das Rad an dieser Stelle schon unterwegs war.</p>
-            <p class="hint" data-hint-for="freq">Wie viele angekommene Fahrten (geschätzte Wege) über jeden Straßenabschnitt liefen. Zeigt die Hauptachsen.</p></div>
+            <p class="hint">Je dicker eine Straße, desto mehr Fahrten liefen dort entlang.</p>
+            <p class="hint" data-hint-for="dir">Farbe: Rot, wo Fahrten meist beginnen, Blau, wo sie meist enden.</p>
+            <p class="hint" data-hint-for="dur">Farbe: wie lange die Räder dort im Mittel schon unterwegs waren.</p>
+            <p class="hint" data-hint-for="freq">Farbe: zusätzlich die Anzahl, für die Hauptachsen.</p></div>
           <label class="toggle"><input type="checkbox" id="setAway"> <span>Live: gerade losgefahrene Räder zeigen</span></label>
           <details class="explain"><summary>Was wird gezeigt?</summary>
             <p>Der Feed zeigt nur abgestellte Räder. Verschwindet ein Rad und taucht woanders wieder auf, ist das eine <b>geschätzte Fahrt</b>.</p>
-            <ul><li><b>Angekommen</b> im Zeitfenster: ganzer Weg.</li>
+            <ul><li><b>Angekommen</b> im Zeitfenster: ganzer Weg, zusammengefasst pro Straßenabschnitt (Dicke = Anzahl).</li>
               <li><b>Läuft</b> zum gezeigten Zeitpunkt (nur im Rückblick, das Ziel ist dann bekannt): der Weg bis zur geschätzten Position. Beispiel: 17:10 los, 17:40 an, Zeitpunkt 17:30 = zwei Drittel des Wegs.</li>
               <li><b>Live</b> ist das Ziel noch unbekannt: nur ein Ring, wo das Rad im Zeitfenster losgefahren ist, gefärbt nach bisheriger Dauer.</li></ul>
             <p>Start und Ziel sind gemessen, der Weg dazwischen ist der günstigste Radweg laut OpenStreetMap (A*-Suche), nicht der tatsächlich gefahrene. Start- und Endzeit sind nur so genau wie der Abstand der Abfragen.</p>

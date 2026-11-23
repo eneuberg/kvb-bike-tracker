@@ -896,7 +896,11 @@ function routeNow(g, lat0, lng0, lat1, lng1) {
   for (let k = 1; k < all.length; k++) len += Math.hypot(all[k][0] - all[k - 1][0], all[k][1] - all[k - 1][1]);
   // fewer points for drawing (2.5 m tolerance): less work for the map on every frame
   const c = simplifyXY(all, 2.5).map((q) => toLL(q[0], q[1]));
-  return { c, len: Math.round(len), ed };
+  // where along the trip each street section lies (0 = start, 1 = destination), at its middle
+  const E = Int32Array.from(ed), em = new Float32Array(E.length);
+  let tot = 0; for (const e of E) tot += g.elen[e];
+  for (let k = 0, cum = 0; k < E.length; k++) { const l = g.elen[E[k]]; em[k] = tot > 0 ? (cum + l / 2) / tot : 0.5; cum += l; }
+  return { c, len: Math.round(len), ed: E, em };
 }
 
 // Douglas-Peucker on [x, y] metres
@@ -918,8 +922,19 @@ async function routes({ pairs }) {
   const g = await loadGraph();
   if (!g) return { ok: false, list: [] };
   const list = [];
-  for (let i = 0; i + 3 < pairs.length; i += 4) { const r = route(g, pairs[i], pairs[i + 1], pairs[i + 2], pairs[i + 3]); list.push(r && { c: r.c, len: r.len }); }
+  for (let i = 0; i + 3 < pairs.length; i += 4) { const r = route(g, pairs[i], pairs[i + 1], pairs[i + 2], pairs[i + 3]); list.push(r && { c: r.c, len: r.len, ed: r.ed, em: r.em }); }
   return { ok: true, list };
+}
+
+// geometry of street sections, for drawing trips aggregated per section
+async function edges({ ids }) {
+  const g = await loadGraph();
+  if (!g) return { ok: false, list: [] };
+  return { ok: true, list: ids.map((e) => {
+    const P = edgePts(g, e), q = [];
+    for (let k = 0; k < P.length; k += 2) q.push([P[k], P[k + 1]]);
+    return simplifyXY(q, 1.5).map((x) => toLL(x[0], x[1]));
+  }) };
 }
 
 // how many of the given trips (estimated routes) use each street section
@@ -1009,7 +1024,7 @@ async function stationMoves({ uid, t0, t1, P, dates }) {
 // ------------------------------------------------------------------ rpc
 const OPS = {
   async init({ base, graph }) { BASE = base; GRAPH_VER = graph || ''; return true; },
-  routes, corridor, bikeTrail, stationMoves,
+  routes, edges, corridor, bikeTrail, stationMoves,
   // new data arrived: forget the changed days and every cached result built on them
   async invalidate({ dates }) {
     for (const d of dates) DAYS.delete(d);

@@ -181,7 +181,7 @@
     // small tile buffers: less data to cut and ship to the GPU on every update
     for (const id of ['bikes', 'stations', 'tripdots'])
       map.addSource(id, { type: 'geojson', data: EMPTY, buffer: 32 });
-    for (const id of ['sel', 'me', 'qpt', 'corr'])
+    for (const id of ['sel', 'me', 'qpt'])
       map.addSource(id, { type: 'geojson', data: EMPTY });
     map.addSource('trips', { type: 'geojson', data: EMPTY, tolerance: 0.6, buffer: 64 });
     map.addSource('hist', { type: 'geojson', data: EMPTY, lineMetrics: true });
@@ -192,6 +192,15 @@
       paint: { 'raster-resampling': 'linear', 'raster-opacity': 0.9, 'raster-fade-duration': 0 } }, before);
     map.addLayer({ id: 'qpt-fill', type: 'fill', source: 'qpt', filter: ['==', ['geometry-type'], 'Polygon'], layout: { visibility: 'none' },
       paint: { 'fill-color': hexA(C.ink, 0.06) } }, before);
+
+    // trips under everything else: one line per street section, thicker = more trips
+    map.addLayer({ id: 'trips-line', type: 'line', source: 'trips', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round', 'line-sort-key': ['get', 'w'] },
+      paint: { 'line-width': ['interpolate', ['linear'], ['zoom'], 10, ['+', 0.9, ['*', 0.5, ['get', 'w']]], 13, ['+', 1.4, ['*', 0.95, ['get', 'w']]], 16, ['+', 2, ['*', 1.7, ['get', 'w']]]],
+        'line-color': ['to-color', ['get', 'col']] } }); // opaque: no darker beads where sections meet
+    map.addLayer({ id: 'trips-pt', type: 'circle', source: 'tripdots', layout: { visibility: 'none' },
+      paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, ['*', ['get', 'r'], 0.5], 16, ['get', 'r']],
+        'circle-color': ['to-color', ['get', 'fill']], 'circle-stroke-color': ['to-color', ['get', 'stroke']], 'circle-stroke-width': ['get', 'sw'],
+        'circle-opacity': ['get', 'op'], 'circle-stroke-opacity': ['get', 'op'] } });
 
     // parked bikes: neutral, so colour stays free for movement
     map.addLayer({ id: 'free-dots', type: 'circle', source: 'bikes', filter: ['==', ['get', 'k'], 0],
@@ -210,17 +219,6 @@
           'text-size': ['interpolate', ['linear'], ['zoom'], 12.6, 9.5, 16, 13], 'text-allow-overlap': true, 'text-ignore-placement': true },
         paint: { 'text-color': ['case', ['==', ['get', 'n'], 0], C.station, C.stText] } });
     }
-
-    // trips: solid lines, red start -> blue destination, or coloured by minutes on the road
-    map.addLayer({ id: 'trips-line', type: 'line', source: 'trips', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' },
-      paint: { 'line-width': lineW(1.4, 3.4), 'line-color': ['to-color', ['get', 'col']], 'line-opacity': 0.62 } });
-    // how many trips use each street section: wider and darker = more
-    map.addLayer({ id: 'trips-corr', type: 'line', source: 'corr', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' },
-      paint: { 'line-width': ['interpolate', ['linear'], ['zoom'], 10, ['+', 0.8, ['*', 3, ['get', 'v']]], 16, ['+', 2, ['*', 10, ['get', 'v']]]],
-        'line-color': ['interpolate', ['linear'], ['get', 'v'], 0, R.freq[0], 0.25, R.freq[1], 0.6, R.freq[2], 1, R.freq[3]], 'line-opacity': 0.92 } });
-    map.addLayer({ id: 'trips-pt', type: 'circle', source: 'tripdots', layout: { visibility: 'none' },
-      paint: { 'circle-radius': ['interpolate', ['linear'], ['zoom'], 10, ['*', ['get', 'r'], 0.55], 16, ['get', 'r']],
-        'circle-color': ['to-color', ['get', 'fill']], 'circle-stroke-color': ['to-color', ['get', 'stroke']], 'circle-stroke-width': ['get', 'sw'] } });
 
     // one bike's or one station's history
     const hk = (k) => ['==', ['get', 'kind'], k];
@@ -274,8 +272,7 @@
     vis('stations-c', L.stations); vis('stations-t', L.stations);
     vis('free-dots', L.free);
     // while one bike's or station's history is open, everything else steps back
-    vis('trips-line', L.trips && !h && S.o.color !== 'freq');
-    vis('trips-corr', L.trips && !h && S.o.color === 'freq');
+    vis('trips-line', L.trips && !h);
     vis('trips-pt', L.trips && !h);
     map.setPaintProperty('free-dots', 'circle-opacity', h ? 0.25 : 1); map.setPaintProperty('free-dots', 'circle-stroke-opacity', h ? 0.25 : 1);
     map.setPaintProperty('stations-c', 'circle-opacity', h ? 0.3 : 1); map.setPaintProperty('stations-c', 'circle-stroke-opacity', h ? 0.3 : 1);
@@ -289,7 +286,7 @@
   // ================================================================ picking
   // Trip lines and dots are a few huge Multi* features; asking the map for them
   // is slow, so they are matched in JS (tripsAt) instead.
-  const PRIORITY = ['hist-stop', 'hist-stay', 'hist-route', 'stations-c', 'free-dots', 'trips-corr'];
+  const PRIORITY = ['hist-stop', 'hist-stay', 'hist-route', 'stations-c', 'free-dots'];
   function pick(pt) {
     const r = isDesktop() ? 6 : 14;
     const layers = PRIORITY.filter(isVis);
@@ -321,7 +318,7 @@
     switch (f.layer.id) {
       case 'stations-c': S.k.isLive ? showStation(p.uid) : showTlStation(p.i); break;
       case 'free-dots': S.k.isLive ? showBike(p.id) : showTlBike(p.i); break;
-      case 'trips-pt': case 'trips-line': case 'trips-corr': {
+      case 'trips-pt': case 'trips-line': {
         const { ks, away } = tripsNear(e.point);
         if (ks.length > 1) showTripPicker(ks);
         else if (ks.length) openTrip({ k: ks[0] });
@@ -856,7 +853,7 @@
       const r = await rpc('routes', { pairs });
       list.forEach((t, k) => {
         const x = r.ok ? r.list[k] : null;
-        t.route = x ? { c: x.c, L: lenAlong(x.c), len: x.len } : null;
+        t.route = x ? { c: x.c, L: lenAlong(x.c), len: x.len, ed: x.ed, em: x.em } : null;
       });
       S.routing = r.ok;
     } catch (err) { console.warn('routes', err); list.forEach((t) => { if (t.route === undefined) t.route = null; }); }
@@ -868,13 +865,33 @@
   const ln = (c, props) => ({ type: 'Feature', geometry: { type: 'LineString', coordinates: c }, properties: props });
   let tripSum = { arrived: 0, running: 0, away: 0, today: 0 };
 
-  // Performance: everything is grouped by colour into a few Multi* features
-  // (one per colour step), so the map gets ~20 features instead of thousands,
-  // and no per-line gradient textures. Taps are matched geometrically.
-  const DIR_STEPS = 6;
+  // Arrived trips are drawn per street section: thickness = how many trips used
+  // it (log scale), colour = their average (where along the trip / minutes on
+  // the road / count). Running and not yet routed trips are drawn one by one.
+  // Everything is grouped into a few Multi* features (colour x thickness), so
+  // the map gets dozens of features instead of thousands.
+  const DIR_STEPS = 6, W_CLS = 9;
   const mix = (h1, h2, f) => { const a = rgb(h1), b = rgb(h2); return `rgb(${a.map((x, i) => Math.round(x + (b[i] - x) * f)).join(',')})`; };
   const dirCols = () => (C.dirCols ||= Array.from({ length: DIR_STEPS }, (_, j) => mix(C.tStart, C.tEnd, j / (DIR_STEPS - 1))));
-  let drawn = [], lastTripsAt = 0, tripsTimer = 0;
+  const freqCols = () => (C.freqCols ||= Array.from({ length: DIR_STEPS }, (_, j) => {
+    const f = (j / (DIR_STEPS - 1)) * (R.freq.length - 1), i = Math.min(R.freq.length - 2, Math.floor(f));
+    return mix(R.freq[i], R.freq[i + 1], f - i);
+  }));
+  const wCls = (n) => Math.min(W_CLS - 1, Math.floor(Math.log2(Math.max(1, n))));
+  const EDGE = new Map(); // street section -> coordinates, fetched from the worker once
+  let edgeBusy = false;
+  async function fetchEdges(ids) {
+    if (edgeBusy) return;
+    edgeBusy = true;
+    try {
+      const want = ids.slice(0, 30000);
+      const r = await rpc('edges', { ids: want });
+      if (r.ok) want.forEach((e, i) => EDGE.set(e, r.list[i]));
+    } catch (err) { console.warn('edges', err); }
+    finally { edgeBusy = false; }
+    renderTrips(S.k.clock);
+  }
+  let drawn = [], lastTripsAt = 0, tripsTimer = 0, tripMax = 0;
   function renderTrips(clock) {
     if (!styleReady) return;
     // while playing, ~8 updates per second are plenty
@@ -887,15 +904,18 @@
       setData('trips', EMPTY); setData('tripdots', EMPTY); drawn = [];
       tripSum = { arrived: 0, running: 0, away: 0, today: 0 }; renderCtx(); return;
     }
-    const A = clock - S.o.win * 60, mode = S.o.color, dir = mode !== 'dur', freq = mode === 'freq';
-    const buckets = new Map(); // colour -> [lines]
-    const dotB = new Map();    // "fill|stroke|r|sw" -> [points]
-    const addL = (col, c) => { if (c.length > 1) { let l = buckets.get(col); if (!l) buckets.set(col, l = []); l.push(c); } };
+    const A = clock - S.o.win * 60, mode = S.o.color, dir = mode === 'dir', freq = mode === 'freq';
+    const buckets = new Map(); // "colour|thickness" -> [lines]
+    const dotB = new Map();    // "fill|stroke|r|sw|opacity" -> [points]
+    const addL = (col, w, c) => { if (c.length > 1) { const key = `${col}|${w}`; let l = buckets.get(key); if (!l) buckets.set(key, l = []); l.push(c); } };
     const addP = (key, c) => { let l = dotB.get(key); if (!l) dotB.set(key, l = []); l.push(c); };
-    const freqPairs = [], need = [], nd = [];
+    const agg = new Map(); // street section -> [trips, sum of progress, sum of minutes]
+    const need = [], nd = [];
     const sum = { arrived: 0, running: 0, away: 0, today: 0 };
     const dayStart = clock - localMin(clock) * 60 - (Math.floor(clock) % 60); // local midnight
     const cols = dirCols();
+    const startDot = dir ? `${C.tStart}|${C.tStart}|2.6|0|0.7` : `${C.ink}|${C.ink}|2.2|0|0.35`;
+    const endDot = dir ? `${C.tEnd}|${C.tEnd}|2.6|0|0.7` : `${C.ink}|${C.ink}|2.2|0|0.35`;
     for (const tr of S.trips) {
       if (tr.s >= clock) break;
       if (tr.e <= clock && tr.e >= dayStart) sum.today++;
@@ -904,43 +924,71 @@
       if (!arrived && !running) continue;
       if (tr.route === undefined) need.push(tr);
       const R = tr.route;
-      const c = R ? R.c : [tr.a, tr.b], L = R ? R.L : lenAlong(c), T = L[L.length - 1];
+      const c = R ? R.c : [tr.a, tr.b];
       const dur = Math.max(60, tr.e - tr.s);
-      const u = arrived ? 1 : Math.min(1, Math.max(0.02, (clock - tr.s) / dur));
-      if (freq) { if (arrived) freqPairs.push(tr); }
-      else if (dir) {
-        // colour = progress along the trip, red at the start, blue at the destination
-        for (let j = 0; j < DIR_STEPS && j / DIR_STEPS < u; j++) addL(cols[j], slice(c, L, (j / DIR_STEPS) * T, Math.min((j + 1) / DIR_STEPS, u) * T));
-      } else for (const p of durPieces(c, L, dur, u)) addL(C.dur[p.k], p.c);
-      addP(`${dir ? C.tStart : C.surface}|${dir ? C.surface : C.ink}|3.6|1.2`, c[0]);
-      let head = null;
-      if (arrived) { sum.arrived++; addP(`${dir ? C.tEnd : C.ink}|${C.surface}|4|1.2`, c[c.length - 1]); }
-      else {
-        sum.running++;
-        head = along(c, L, u);
-        const col = dir ? cols[Math.min(DIR_STEPS - 1, Math.floor(u * DIR_STEPS))] : C.dur[durClass((clock - tr.s) / 60)];
-        addP(`${C.surface}|${col}|4.6|2`, head);
+      addP(startDot, c[0]);
+      if (arrived) {
+        sum.arrived++;
+        addP(endDot, c[c.length - 1]);
+        nd.push({ k: tr.k, c, bb: R ? (R.bb ||= bboxOf(c)) : bboxOf(c) });
+        if (R && R.ed) {
+          const ed = R.ed, em = R.em, dm = dur / 60;
+          for (let j = 0; j < ed.length; j++) {
+            let a = agg.get(ed[j]); if (!a) agg.set(ed[j], a = [0, 0, 0]);
+            a[0]++; a[1] += em[j]; a[2] += em[j] * dm;
+          }
+          continue;
+        }
       }
-      nd.push({ k: tr.k, c: u < 1 ? partial(c, L, u) : c, bb: R ? (R.bb ||= bboxOf(c)) : bboxOf(c) });
+      // one by one: running at a past moment, or no route (yet)
+      const L = R ? R.L : lenAlong(c), T = L[L.length - 1];
+      const u = arrived ? 1 : Math.min(1, Math.max(0.02, (clock - tr.s) / dur));
+      if (dir || freq) {
+        const cc = freq ? freqCols() : cols;
+        for (let j = 0; j < DIR_STEPS && j / DIR_STEPS < u; j++) addL(freq ? cc[0] : cc[j], 0, slice(c, L, (j / DIR_STEPS) * T, Math.min((j + 1) / DIR_STEPS, u) * T));
+      } else for (const p of durPieces(c, L, dur, u)) addL(C.dur[p.k], 0, p.c);
+      if (!arrived) {
+        sum.running++;
+        const head = along(c, L, u);
+        const col = dir ? cols[Math.min(DIR_STEPS - 1, Math.floor(u * DIR_STEPS))] : C.dur[durClass((clock - tr.s) / 60)];
+        addP(`${C.surface}|${col}|4.2|1.8|1`, head);
+        nd.push({ k: tr.k, c: partial(c, L, u), bb: R ? (R.bb ||= bboxOf(c)) : bboxOf(c) });
+      }
     }
+    // street sections
+    let maxN = 1;
+    for (const a of agg.values()) if (a[0] > maxN) maxN = a[0];
+    const missing = [], fc = freqCols(), lmax = Math.log(maxN + 1);
+    for (const [e, a] of agg) {
+      const g = EDGE.get(e);
+      if (!g) { missing.push(e); continue; }
+      const n = a[0];
+      const col = freq ? fc[Math.min(DIR_STEPS - 1, Math.floor((Math.log(n + 1) / lmax) * DIR_STEPS))]
+        : dir ? cols[Math.min(DIR_STEPS - 1, Math.floor((a[1] / n) * DIR_STEPS))] : C.dur[durClass(a[2] / n)];
+      addL(col, wCls(n), g);
+    }
+    tripMax = agg.size ? maxN : 0;
     const away = [];
     if (S.k.isLive && S.o.away) {
       for (const a of S.away) {
         if (a.since < A) continue; // only departures inside the window, like the trips
         sum.away++;
-        addP(`rgba(0,0,0,0)|${C.dur[durClass((clock - a.since) / 60)]}|4.4|1.6`, a.a);
+        addP(`rgba(0,0,0,0)|${C.dur[durClass((clock - a.since) / 60)]}|4.2|1.6|1`, a.a);
         away.push(a);
       }
     }
     drawn = nd; drawn.away = away;
-    setData('trips', { type: 'FeatureCollection', features: [...buckets].map(([col, l]) => ({ type: 'Feature', geometry: { type: 'MultiLineString', coordinates: l }, properties: { col } })) });
-    setData('tripdots', { type: 'FeatureCollection', features: [...dotB].map(([key, l]) => {
-      const [fill, stroke, r, sw] = key.split('|');
-      return { type: 'Feature', geometry: { type: 'MultiPoint', coordinates: l }, properties: { fill, stroke, r: +r, sw: +sw } };
+    setData('trips', { type: 'FeatureCollection', features: [...buckets].map(([key, l]) => {
+      const [col, w] = key.split('|');
+      return { type: 'Feature', geometry: { type: 'MultiLineString', coordinates: l }, properties: { col, w: +w } };
     }) });
-    if (freq) updateCorridor(freqPairs); else if (corrKey) { corrKey = ''; setData('corr', EMPTY); }
+    setData('tripdots', { type: 'FeatureCollection', features: [...dotB].map(([key, l]) => {
+      const [fill, stroke, r, sw, op] = key.split('|');
+      return { type: 'Feature', geometry: { type: 'MultiPoint', coordinates: l }, properties: { fill, stroke, r: +r, sw: +sw, op: +op } };
+    }) });
     tripSum = sum;
     renderCtx();
+    if (missing.length) fetchEdges(missing);
     if (need.length) fetchRoutes(need.slice(0, 600));
   }
 
@@ -964,39 +1012,9 @@
     return { ks, away };
   }
 
-  // street sections by number of trips (arrived in the window), computed in the worker
-  let corrKey = '', corrBusy = false, corrNext = null, corrMax = 0;
-  async function updateCorridor(list) {
-    const key = list.map((t) => t.k).join(',');
-    if (key === corrKey) return;
-    if (corrBusy) { corrNext = list; return; }
-    corrKey = key; corrBusy = true;
-    try {
-      const pairs = [];
-      for (const t of list) pairs.push(t.a[1], t.a[0], t.b[1], t.b[0]);
-      const r = await rpc('corridor', { pairs });
-      corrMax = r.max || 0;
-      const m = Math.max(1, corrMax);
-      S.corrList = r.list.map((x) => x.ix.map((i) => list[i].k));
-      setData('corr', { type: 'FeatureCollection', features: r.list.map((x, i) => ln(x.c, { n: x.n, v: Math.sqrt(x.n / m), i })) });
-      renderCtx();
-    } catch (err) { console.warn('corridor', err); }
-    finally {
-      corrBusy = false;
-      if (corrNext) { const n = corrNext; corrNext = null; updateCorridor(n); }
-    }
-  }
-
-  // all trips under the finger (overlapping lines, or one street section in "Häufigkeit")
+  // all trips under the finger
   function tripsNear(point) {
-    const r = isDesktop() ? 7 : 14, box = [[point.x - r, point.y - r], [point.x + r, point.y + r]];
-    // "Häufigkeit": exactly the trips counted on the tapped section, so number and list agree
-    const fs = S.o.color === 'freq' && isVis('trips-corr') ? map.queryRenderedFeatures(box, { layers: ['trips-corr'] }) : [];
-    if (fs.length) {
-      const f = fs.sort((a, b) => b.properties.n - a.properties.n)[0];
-      return { ks: [...new Set(S.corrList?.[+f.properties.i] || [])], away: [] };
-    }
-    return tripsAt(map.unproject(point), r);
+    return tripsAt(map.unproject(point), isDesktop() ? 7 : 14);
   }
   // a list to pick from; only these trips stay on the map
   function showTripPicker(ks) {
@@ -1477,10 +1495,16 @@
     if (S.o.metric === 'median') return { cap: 'Typischer Weg zum nächsten Rad (Luftlinie)', body: stepLegend(STEPS, DIST_CLASSES.map((c) => c[1]), DIST_CLASSES.map((c) => `~${c[2]} Min.`)) };
     return { cap: 'Abgestellte Räder pro Hektar, im Schnitt', body: `<div class="bar" style="background:${gradient(R.heat.slice(1))}"></div><div class="scale"><span>wenige</span><span>${ovInfo?.vmax ? `${nf1.format(ovInfo.vmax)} pro ha` : 'viele'}</span></div>` };
   }
+  // line thickness by trips per street section: three samples up to the current maximum
+  function widthLegend() {
+    if (tripMax < 2) return '';
+    const top = wCls(tripMax), ns = [...new Set([0, Math.round(top / 2), top])].map((w) => 2 ** w);
+    return `<div class="wleg"><span>Dicke</span>${ns.map((n) => `<i style="height:${(1.4 + 0.95 * wCls(n)).toFixed(1)}px"></i><b>${nf.format(n)}</b>`).join('')}<span>Fahrten</span></div>`;
+  }
   function tripLegend() {
-    if (S.o.color === 'dir') return `<div class="tleg"><span>Start</span><i class="stop s"></i><div class="grad"></div><i class="stop e"></i><span>Ziel</span></div>`;
-    if (S.o.color === 'freq') return `<div class="bar" style="background:${gradient(R.freq)}"></div><div class="grad-scale"><span>1 Fahrt</span><span>${corrMax > 1 ? `${nf.format(corrMax)} Fahrten` : 'mehr'} pro Abschnitt</span></div>`;
-    return `<div class="durs">${DUR_LABELS.map((l, k) => `<div><i style="background:${C.dur[k]}"></i><span>${l}</span></div>`).join('')}</div>`;
+    if (S.o.color === 'dir') return `<div class="tleg"><span>Start</span><i class="stop s"></i><div class="grad"></div><i class="stop e"></i><span>Ziel</span></div>${widthLegend()}`;
+    if (S.o.color === 'freq') return `<div class="bar" style="background:${gradient(R.freq)}"></div><div class="grad-scale"><span>1 Fahrt</span><span>${tripMax > 1 ? `${nf.format(tripMax)} Fahrten` : 'mehr'} pro Abschnitt</span></div>`;
+    return `<div class="durs">${DUR_LABELS.map((l, k) => `<div><i style="background:${C.dur[k]}"></i><span>${l}</span></div>`).join('')}</div>${widthLegend()}`;
   }
   const winText = () => (S.o.win >= 1440 ? '24 Std.' : S.o.win >= 60 ? `${S.o.win / 60} Std.` : `${S.o.win} Min.`);
 
