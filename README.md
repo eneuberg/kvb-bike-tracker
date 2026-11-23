@@ -1,124 +1,50 @@
-# KVB-Rad bike tracker
+# KVB-Rad Tracker · Köln
 
-Tracks every KVB-Rad bike in Köln via the public nextbike live API. It draws a map of all bikes with per-bike metadata, adds a density heatmap, and keeps a full history of positions and changes.
+**Live-Karte und Verlauf aller KVB-Räder in Köln.** Wo stehen gerade Räder, wo wird gefahren, und wo findet man zu welcher Uhrzeit am ehesten eins? Die Daten kommen aus der öffentlichen nextbike-API und werden jede Minute abgefragt.
 
-**Interactive map:** https://eneuberg.github.io/kvb-bike-tracker/
+*Live map and history of every KVB-Rad bike-share bike in Cologne, Germany: trips, availability and statistics from the nextbike API.*
 
-One map view with a timeline (the right end is live) and four layers:
+**[→ Live-Karte öffnen](https://eneuberg.github.io/kvb-bike-tracker/)**
 
-| Layer | What it shows |
-|---|---|
-| **Stationen / Frei** | Parked bikes, kept neutral (stations dark with their count, larger with more bikes; free bikes grey). Each can be switched off. |
-| **Fahrten** | Estimated trips in a time window ending at the shown moment (15 min to 24 h): arrived trips as their whole estimated route, trips still running at a past moment up to their estimated position, and live a ring where each bike on the road left from (its destination is unknown until it reappears). Colours: *Start → Ziel* (red to blue), *Dauer* (minutes on the road) or *Häufigkeit* (how many trips use each street section). Tap a trip for the bike's profile; tap where several overlap for a list to pick from. |
-| **Verfügbarkeit** | How well you find a bike at a place, at the time of day of the window, over the last 7–56 days: chance of a bike within a radius (default), typical walk to the nearest bike, or bikes per hectare; 10/25/50 m raster. Tap anywhere for all three values and the course of the day. |
+<a href="https://eneuberg.github.io/kvb-bike-tracker/"><img src="docs/screenshots/readme-desktop.png" alt="KVB-Rad Tracker: Karte von Köln mit allen KVB-Rädern und den Fahrten der letzten Stunden" width="100%"></a>
 
-Tap a bike for its profile over a chosen period (up to `TRAIL_MAX_DAYS`): where it was parked, every snapshot, and each trip along its estimated route. Tap a station for its bikes, arrivals and departures, and typical fill. *Statistik* (in the settings) has trips per day and hour, duration, distance and how long bikes stand.
+<p>
+<img src="docs/screenshots/readme-phone-karte.png" alt="KVB-Rad Tracker auf dem Handy: Live-Karte" width="49%">
+<img src="docs/screenshots/readme-phone-verfuegbarkeit.png" alt="KVB-Rad Tracker auf dem Handy: Verfügbarkeit von Leihrädern in Köln, dunkles Design" width="49%">
+</p>
 
-The map uses MapLibre GL with [OpenFreeMap](https://openfreemap.org) vector tiles (free, no key), so markers and heatmaps scale smoothly while zooming. It works on phones (bottom sheet) and desktop (side panel), in light and dark mode.
+## Was du siehst
 
-### Current bikes
-[![Current map of all KVB-Rad bikes](https://eneuberg.github.io/kvb-bike-tracker/map.png)](https://eneuberg.github.io/kvb-bike-tracker/)
+- **Räder live:** rund 2.300 KVB-Räder an Stationen und frei abgestellt, Stationen nach Anzahl Räder skaliert.
+- **Fahrten:** jede Fahrt als geschätzte Route von Start (rot) nach Ziel (blau), alternativ nach Dauer oder nach Häufigkeit pro Straßenabschnitt.
+- **Zeitleiste:** zurückspulen und abspielen, bis zu 8 Wochen Verlauf.
+- **Verfügbarkeit:** Chance auf ein Rad im Umkreis, je Ort und Tageszeit.
+- **Profile:** Antippen zeigt den Verlauf eines Rads oder die An- und Abfahrten einer Station.
 
-### Density heatmap
-[![Heatmap of KVB-Rad bike density](https://eneuberg.github.io/kvb-bike-tracker/heatmap.png)](https://eneuberg.github.io/kvb-bike-tracker/)
+Läuft auf Handy und Desktop, hell und dunkel.
 
-<sub>GitHub Actions updates both images every 15 minutes. GitHub's image proxy may show a copy that is a few minutes older.</sub>
+## So funktioniert's
+
+1. Ein Container fragt den nextbike-Feed etwa jede Minute ab und speichert Änderungen als CSV.
+2. Verschwindet ein Rad und taucht woanders wieder auf, zählt das als Fahrt.
+3. Der Browser berechnet die wahrscheinlichste Radroute auf dem OpenStreetMap-Netz (A\*).
+
+## Selbst betreiben
+
+```bash
+docker compose up --build    # Karte auf Port 8080
+```
+
+Oder in Coolify als Docker-Compose-Ressource. Alternativ läuft eine einfache Version über GitHub Actions und Pages. Details zu Einstellungen, Datenformat und Methode stehen in **[docs/technik.md](docs/technik.md)**.
+
+## Häufige Fragen
+
+**Woher kommen die Daten?** Aus dem öffentlichen Live-Feed von nextbike, dem Betreiber von KVB-Rad (`api.nextbike.net`).
+
+**Sind die Fahrten exakt?** Nein. Der Feed zeigt nur geparkte Räder. Start, Ziel und Zeit sind auf etwa eine Minute genau, die Route ist geschätzt.
+
+**Ist das eine offizielle KVB-App?** Nein, ein unabhängiges Projekt ohne Verbindung zu KVB oder nextbike.
 
 ---
 
-## What gets collected
-
-Per bike (fields are optional; they appear when the feed provides them):
-
-| field | meaning |
-|---|---|
-| `bike` | bike number (stable ID) |
-| `lat`, `lng` | position |
-| `kind` | `station` (docked) or `free` (free-floating) |
-| `place_name` | station name if docked |
-| `electric`, `battery` | e-bike flag, battery % |
-| `bike_type`, `state`, `active`, `lock_types` | nextbike metadata |
-
-Per station: name, number, bikes docked, bikes available, racks, free racks, terminal type.
-
-## History (`data/history/`)
-
-Plain CSV, append-only, committed by every run:
-
-```
-data/history/
-  runs.csv                          one row per poll: counts + new/moved/changed/gone
-  2026/10/2026-10-29.csv            bike events of that day
-  2026/10/2026-10-29.stations.csv   station snapshot of that day
-```
-
-Event types in a day file:
-
-- **`snapshot`**: the full state of every bike, written by the first poll of each day. This makes every day file self-contained.
-- **`new`**: a bike appeared in the feed (e.g. returned after a ride).
-- **`moved`**: a bike changed position by more than `MOVE_THRESHOLD_M` (default 25 m) or changed station.
-- **`changed`**: metadata changed (state, active, kind, or battery by at least 5 %).
-- **`gone`**: a bike left the feed (usually rented, sometimes in service).
-
-To reconstruct the state at time *t*, replay a day file up to *t*. `tracker.history.replay()` does this. A `gone` followed later by `new` at another place is approximately one trip.
-
-The Pages site mirrors the last 31 days at `/history/`. The repo keeps everything.
-
-## Run it
-
-### GitHub Actions (this repo)
-`.github/workflows/update.yml` runs every 15 minutes. It fetches, commits history, and deploys the map to GitHub Pages. You can trigger it by hand under **Actions → update map → Run workflow**.
-
-One-time setup: **Settings → Pages → Source: GitHub Actions**. Optionally add a repository secret `TILE_API_KEY` (see *Basemap*).
-
-### Coolify / Docker
-`docker-compose.yml` runs a long-lived container that polls on its own schedule and serves the map on port 8080. History lives in the `tracker-data` volume.
-
-In Coolify: **New Resource → Docker Compose → this repo**, assign a domain to the `tracker` service (port 8080), deploy.
-
-On the first start with an empty volume, the container copies the history that GitHub Actions had recorded up to the image build (`data/history`), so the timeline does not start from zero. After that, the container keeps its own history in the volume and never overwrites it.
-
-| env var | default | description |
-|---|---|---|
-| `UPDATE_INTERVAL_MINUTES` | `1` in compose (`15` otherwise) | poll interval in minutes (fractions allowed, minimum 1). nextbike refreshes its data once a minute (GBFS `ttl` 60 s), so 1 is the finest useful value |
-| `UPDATE_JITTER_SECONDS` | `15` | container only: gaps vary around the interval, mostly ± this many seconds, now and then a longer pause (up to 3×), never below half the interval |
-| `TRAIL_MAX_DAYS` | `7` | longest period the page offers for one bike's or station's history |
-| `MANUAL_REFRESH_MINUTES` | `1` | container only: visitors can trigger a poll from the page, for all visitors together at most once per this many minutes (`0` = off). The automatic schedule counts from the latest poll, manual or not |
-| `NEXTBIKE_DOMAIN` | `kg` | nextbike network ID (`kg` = KVB-Rad Köln) |
-| `NEXTBIKE_CITY_ID` | – | restrict to one nextbike city UID instead |
-| `MOVE_THRESHOLD_M` | `25` | movement threshold for `moved` events |
-| `RENDER_PNG` | `true` | render `map.png` / `heatmap.png` on each update |
-| `TILE_API_KEY` | – | free [CARTO basemap key](https://carto.com/basemaps/apikey) for the PNG renders; see *Basemap* below |
-| `ANALYSIS_DAYS` | `56` | how many days of history the web app can load (Verlauf and Analyse) |
-| `TIMELINE_STEP_MINUTES` | `1` in compose (`5` otherwise) | polls closer than this are merged in the timeline files (the CSV history keeps all) |
-| `ANALYSIS_INTERVAL_MINUTES` | `2` in compose (`30` otherwise) | container only: rebuild the timeline files at most this often (only the last two days; all days at most hourly) |
-
-The container serves `/` (interactive map), `/map.png`, `/heatmap.png`, `/latest.json` (current state), `/status.json` (time of the latest poll and app version) and `/history/` (all CSVs).
-
-An open page checks `status.json` every minute, right after the next automatic poll is due, and when you return to the tab. New data is loaded in place. The badge top right shows the data time; tapping it opens a small panel with the schedule and, in the container, a "Jetzt neu abfragen" button (`POST /api/refresh`). The button is greyed out with a countdown until the minimum gap has passed; the limit is enforced on the server for all visitors together (one poll at a time, `429` with `Retry-After` when too early). On GitHub Pages the button only checks whether newer files have been published, because a static site cannot start a poll. A new app version shows "Neue Version" in the badge.
-
-Locally:
-
-```bash
-docker compose up --build    # uncomment `ports` in the compose file first
-# or without Docker:
-pip install -r requirements.txt
-python -m tracker once       # single update into ./data
-python -m tracker serve      # loop + http://localhost:8080
-```
-
-### Tests
-```bash
-pip install pytest && python -m pytest -q
-```
-The tests use a synthetic feed and need no network.
-
-## Notes and limits
-
-- **Data source:** `api.nextbike.net/maps/nextbike-live.json`. It's public but undocumented, so nextbike can change it without notice. Use moderate poll intervals.
-- **No exact rental times:** neither the live feed nor nextbike's GBFS feed has per-bike timestamps (checked with `.github/workflows/probe.yml`). GBFS also uses rotating bike IDs, so single bikes can only be followed in the live feed. Trip start and end are therefore only as exact as the poll interval (± half of it). The feed is about 70 KB per poll on the wire (gzip), 1.2 MB as JSON.
-- **Rentals are inferred:** the feed shows only parked bikes, not rides. "Trips" come from `gone` → `new` pairs and are therefore approximations.
-- **Analysis method:** `tracker/analysis.py` replays the CSV history and writes one compact file per day (`tl/YYYY-MM-DD.json`: full state at the first poll, then per-poll changes). `tracker/web/worker.js` loads the selected days in a Web Worker and computes everything there. Walking distance uses an exact Euclidean distance transform per poll; the stepped colours are classified on a 3–4× interpolated raster with anti-aliased edges, so the bands are round. Tap queries are computed exactly for the point. Trips are inferred: a bike leaves the feed and reappears at least *x* m away (default 100 m; absences over 4 h count as service), or jumps more than *y* m between two polls (default 300 m). Movements across a gap of more than an hour between two polls (missed runs) are not counted, because their time is unknown. Rebalancing by van can't be separated reliably. Hours use Europe/Berlin local time; public holidays count as normal weekdays.
-- **Routes are estimated:** the feed only has start and end. `tools/build_graph.py` (run monthly by `.github/workflows/graph.yml`) builds a bicycle graph of Köln from OpenStreetMap (© OpenStreetMap contributors, ODbL): cycleways preferred, busy roads, rough surfaces and pushing penalised, one-ways respected. The browser routes each trip with A* (about 1 ms per route) between the snapped start and end. This is the cheapest plausible way, not the way actually ridden.
-- **Basemap:** CARTO now requires a free API key ([request one](https://carto.com/basemaps/apikey)). The interactive map uses OpenFreeMap. With `TILE_API_KEY` set, the PNG renders use CARTO light tiles (© OpenStreetMap contributors © CARTO; free up to 5M non-commercial requests/month). Without a key the PNGs are drawn without a basemap. OSM's [tile policy](https://operations.osmfoundation.org/policies/tiles/) forbids pre-fetching tiles server-side.
-- **Schedule:** in public repos, GitHub pauses scheduled workflows after 60 days without repo activity. The history commits should keep this repo active.
+<sub>Kartendaten © OpenStreetMap-Mitwirkende (ODbL), Kartenstil OpenFreeMap. Radverfügbarkeit: nextbike GmbH.</sub>

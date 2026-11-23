@@ -1,6 +1,9 @@
-"""Screenshot the built site at phone and desktop sizes (used by CI previews).
+"""Screenshot the app at phone and desktop sizes.
 
-    python tools/screenshots.py SITE_DIR OUT_DIR
+    python tools/screenshots.py SITE_DIR_OR_URL OUT_DIR [--readme]
+
+SITE_DIR is served locally (CI previews); a URL is used as is. --readme takes
+only the few images used in the README (docs/screenshots/).
 """
 
 from __future__ import annotations
@@ -29,7 +32,8 @@ PLAY = "() => { const T = window.__app.tl; if (T) { window.__ui.setFrame(Math.ma
 AVAIL = "() => window.__ui.setLayer('avail', true)"
 FREQ = """() => { const b = document.querySelector('[data-set=\"color\"] [data-v=\"freq\"]'); b && b.click(); }"""
 TRIP = """() => { const A = window.__app; const t = A.trips && A.trips.filter((x) => x.e <= A.k.clock).pop(); if (t) window.__ui.openTrip({ k: t.k }); }"""
-PREP = "() => { localStorage.removeItem('kvb-ui-v1'); }"
+PREP = "() => { localStorage.removeItem('kvb-ui-v1'); localStorage.removeItem('kvb-panel-v1'); }"
+WIN3H = """() => { const b = document.querySelector('[data-set=\"win\"] [data-v=\"180\"]'); b && b.click(); }"""
 FULL = "() => window.__ui.setSheet('full')"
 WAIT = "() => new Promise((r) => setTimeout(r, 3000))"
 
@@ -48,24 +52,36 @@ SHOTS = [
     ("desktop-dark-verfuegbarkeit", {**DESK, "color_scheme": "dark"}, "", [AVAIL, WAIT, POINT]),
 ]
 
-def main(site: str, out: str) -> int:
+README = [
+    ("readme-desktop", {**DESK, "device_scale_factor": 2}, "", [WIN3H, WAIT]),
+    ("readme-phone-karte", PHONE, "", [WIN3H, WAIT]),
+    ("readme-phone-verfuegbarkeit", {**PHONE, "color_scheme": "dark"}, "", [AVAIL, WAIT, POINT]),
+]
+
+
+def main(site: str, out: str, readme: bool = False) -> int:
     out_dir = Path(out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=site)
-    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 8765), handler)
-    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    httpd = None
+    if site.startswith("http"):
+        base = site.rstrip("/") + "/"
+    else:
+        handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=site)
+        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 8765), handler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        base = "http://127.0.0.1:8765/"
     errors = 0
     with sync_playwright() as pw:
         browser = pw.chromium.launch(args=["--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--ignore-gpu-blocklist"])
-        for name, opts, hash_, actions in SHOTS:
+        for name, opts, hash_, actions in (README if readme else SHOTS):
             ctx = browser.new_context(**opts, locale="de-DE", timezone_id="Europe/Berlin")
             page = ctx.new_page()
             errs: list[str] = []
             page.on("pageerror", lambda e, errs=errs: errs.append(str(e)))
             page.on("console", lambda m, errs=errs: errs.append(m.text) if m.type == "error" else None)
-            page.goto(f"http://127.0.0.1:8765/")
+            page.goto(base)
             page.evaluate(PREP)  # default settings
-            page.goto(f"http://127.0.0.1:8765/{hash_}")
+            page.goto(base + hash_)
             page.reload()
             try:
                 page.wait_for_function("() => window.__app && window.__app.live && document.querySelector('.maplibregl-canvas')", timeout=20000)
@@ -82,9 +98,11 @@ def main(site: str, out: str) -> int:
             errors += bool(errs)
             ctx.close()
         browser.close()
-    httpd.shutdown()
+    if httpd:
+        httpd.shutdown()
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1], sys.argv[2]))
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    sys.exit(main(args[0], args[1], "--readme" in sys.argv))
