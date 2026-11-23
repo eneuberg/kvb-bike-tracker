@@ -231,6 +231,19 @@ def seed_history(cfg: Config) -> int:
     return n
 
 
+def next_jitter(interval: float, j: float, rnd: random.Random = random) -> float:
+    """Offset for the next automatic poll, so the gaps are irregular but
+    still average about the interval: mostly +-j at random, sometimes
+    (1 in 8) a longer pause of up to 3*j. Never shorter than half the
+    interval (nextbike refreshes its data once a minute, faster is useless)."""
+    if not j:
+        return 0.0
+    off = rnd.triangular(-j, j, 0)          # most gaps close to the interval
+    if rnd.random() < 0.125:
+        off += rnd.uniform(j, 3 * j)        # now and then a longer break
+    return max(off, -interval / 2)
+
+
 class Poller:
     """One poll at a time, from the schedule or from a visitor.
 
@@ -254,8 +267,7 @@ class Poller:
             return False
         finally:
             self.last = started
-            j = self.cfg.update_jitter_seconds
-            self.jitter = random.uniform(-j, j) if j else 0.0
+            self.jitter = next_jitter(self.cfg.update_interval_seconds, self.cfg.update_jitter_seconds)
 
     def poll(self) -> bool:
         with self.lock:

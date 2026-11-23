@@ -203,3 +203,16 @@ def test_incremental_export_keeps_older_days(tmp_path):
     inc = json.loads((tl / "index.json").read_text())
     assert [d["date"] for d in inc["days"]] == [d["date"] for d in full["days"]]
     assert (tl / f"{first}.json").stat().st_mtime_ns == mtime
+
+
+def test_poll_gaps_are_irregular_but_average_the_interval():
+    import random
+
+    from tracker.main import next_jitter
+
+    rnd = random.Random(1)
+    gaps = [60 + next_jitter(60, 15, rnd) for _ in range(5000)]
+    assert min(gaps) >= 30 and max(gaps) <= 60 + 15 + 45
+    assert 60 <= sum(gaps) / len(gaps) <= 66          # about one per minute
+    assert len({round(g) for g in gaps}) > 50         # no fixed rhythm
+    assert next_jitter(60, 0, rnd) == 0

@@ -8,12 +8,13 @@ services:
     environment:
       # How often to poll the nextbike API (minutes, fractions allowed, min 1).
       # nextbike refreshes its data once a minute (GBFS ttl = 60 s), so 1 is the
-      # finest that makes sense; 2 halves the load and still dates trips to +-1 min.
-      - UPDATE_INTERVAL_MINUTES=${UPDATE_INTERVAL_MINUTES:-2}
+      # finest that makes sense (trips dated to about +-30 s).
+      - UPDATE_INTERVAL_MINUTES=${UPDATE_INTERVAL_MINUTES:-1}
       # Visitors can trigger a poll from the page ("Jetzt neu abfragen"), but for
       # everyone together at most once per this many minutes. 0 = off.
       - MANUAL_REFRESH_MINUTES=${MANUAL_REFRESH_MINUTES:-1}
-      # Each wait varies by up to this many seconds (+/-), so polls are not exactly periodic
+      # Gaps vary around the interval: mostly +-this many seconds, now and then a
+      # longer pause (up to 3x), so polls never form a fixed rhythm
       - UPDATE_JITTER_SECONDS=${UPDATE_JITTER_SECONDS:-15}
       # Polls closer together than this are merged in the timeline (raw CSV keeps all)
       - TIMELINE_STEP_MINUTES=${TIMELINE_STEP_MINUTES:-1}

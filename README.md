@@ -80,8 +80,8 @@ On the first start with an empty volume, the container copies the history that G
 
 | env var | default | description |
 |---|---|---|
-| `UPDATE_INTERVAL_MINUTES` | `2` in compose (`15` otherwise) | poll interval in minutes (fractions allowed, minimum 1). nextbike refreshes its data once a minute (GBFS `ttl` 60 s), so 1 is the finest useful value |
-| `UPDATE_JITTER_SECONDS` | `15` in compose (`30` otherwise) | container only: each wait varies by up to ± this many seconds |
+| `UPDATE_INTERVAL_MINUTES` | `1` in compose (`15` otherwise) | poll interval in minutes (fractions allowed, minimum 1). nextbike refreshes its data once a minute (GBFS `ttl` 60 s), so 1 is the finest useful value |
+| `UPDATE_JITTER_SECONDS` | `15` | container only: gaps vary around the interval, mostly ± this many seconds, now and then a longer pause (up to 3×), never below half the interval |
 | `TRAIL_MAX_DAYS` | `7` | longest period the page offers for one bike's or station's history |
 | `MANUAL_REFRESH_MINUTES` | `1` | container only: visitors can trigger a poll from the page, for all visitors together at most once per this many minutes (`0` = off). The automatic schedule counts from the latest poll, manual or not |
 | `NEXTBIKE_DOMAIN` | `kg` | nextbike network ID (`kg` = KVB-Rad Köln) |
