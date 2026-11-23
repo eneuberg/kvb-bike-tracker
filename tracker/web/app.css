@@ -519,3 +519,23 @@ h3.group { margin: 24px 0 0; color: var(--ink); font-weight: 600; }
 .gap + .sec, .gap + .block, .group-label + .sec { border-top: 0; }
 .group-label { margin: 16px 0 0; font-size: 11.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
 #panel.has-detail .winrow { display: none; }
+
+/* ---------------------------------------------------------------- make controls look pressable */
+button { cursor: pointer; -webkit-tap-highlight-color: transparent; }
+/* layer tiles: raised when on, flat and dashed when off, pressed on tap */
+.lt.on { background: var(--surface); border: 1px solid var(--line);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, .08), 0 3px 8px rgba(15, 23, 42, .07); }
+:root[data-theme="dark"] .lt.on { background: var(--surface-2); box-shadow: 0 1px 2px rgba(0, 0, 0, .45), 0 3px 10px rgba(0, 0, 0, .3); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .lt.on { background: var(--surface-2); box-shadow: 0 1px 2px rgba(0, 0, 0, .45), 0 3px 10px rgba(0, 0, 0, .3); } }
+.lt { transition: transform .08s, box-shadow .15s, background .15s; }
+.lt:active { transform: scale(.96); box-shadow: none; }
+/* segmented buttons and section headers react to hover and press */
+.seg button:not([aria-checked="true"]):hover { background: color-mix(in srgb, var(--ink) 6%, transparent); color: var(--ink); }
+.seg button:active { transform: scale(.97); }
+.sec-h { border-radius: var(--r-sm); margin: 0 -8px; padding: 0 8px; width: calc(100% + 16px); transition: background .15s; }
+.sec-h:hover { background: var(--surface-2); }
+.sec-h:active { background: var(--surface-3); }
+.sec-h .chev { background: var(--surface-2); border-radius: 50%; padding: 3px; width: 26px; height: 26px; }
+.speed:hover, .livebtn:hover, .more-toggle:hover { filter: brightness(.97); }
+.speed:active, .livebtn:active, .more-toggle:active, .play:active { transform: scale(.96); }
+.wleg.sub { margin-top: 4px; }

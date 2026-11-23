@@ -194,10 +194,10 @@
       paint: { 'fill-color': hexA(C.ink, 0.06) } }, before);
 
     // trips under everything else: one line per street section, thicker = more trips
-    map.addLayer({ id: 'trips-glow', type: 'line', source: 'trips', filter: ['>=', ['get', 'w'], 5], layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' },
+    map.addLayer({ id: 'trips-glow', type: 'line', source: 'trips', filter: ['>=', ['get', 'w'], 6], layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' },
       paint: { 'line-width': ['interpolate', ['linear'], ['zoom'], 10, ['*', 2.2, ['get', 'w']], 16, ['*', 5, ['get', 'w']]],
         'line-blur': ['interpolate', ['linear'], ['zoom'], 10, 4, 16, 10], 'line-color': ['to-color', ['get', 'col']],
-        'line-opacity': ['interpolate', ['linear'], ['get', 'w'], 5, DARK ? 0.12 : 0.08, 8, DARK ? 0.32 : 0.2] } });
+        'line-opacity': ['interpolate', ['linear'], ['get', 'w'], 6, DARK ? 0.14 : 0.08, 8, DARK ? 0.32 : 0.2] } });
     map.addLayer({ id: 'trips-line', type: 'line', source: 'trips', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round', 'line-sort-key': ['get', 'w'] },
       paint: { 'line-width': ['interpolate', ['linear'], ['zoom'], 10, ['+', 0.9, ['*', 0.5, ['get', 'w']]], 13, ['+', 1.4, ['*', 0.95, ['get', 'w']]], 16, ['+', 2, ['*', 1.7, ['get', 'w']]]],
         'line-color': ['to-color', ['get', 'col']],
@@ -736,6 +736,11 @@
         const o = r.openNow;
         S.away.push({ bike: r.bikes[o[i]], since: o[i + 1], a: [o[i + 3], o[i + 2]], from: stName(o[i + 4]) });
       }
+      // average trips per second over the loaded polls (gaps over an hour left out),
+      // the reference for how "busy" a window is
+      let covered = 0;
+      for (let k = 1; k < r.pollT.length; k++) { const g = r.pollT[k] - r.pollT[k - 1]; if (g <= 3600) covered += g; }
+      S.tripRate = covered > 3 * 3600 ? list.filter((t) => !t.short).length / covered : null;
       const m = new Map(r.pollT.map((x, k) => [x, r.inuse[k]]));
       T.inuse = T.t.map((x) => m.get(x) ?? 0);
       S.k.liveInuse = r.inuse[r.inuse.length - 1] ?? null;
@@ -922,11 +927,12 @@
   // thick; few trips = thin and see-through, the busiest = bright with a glow.
   // Capped for small counts, so 3 trips never look like a main axis.
   const intensity = (n, maxN) => (maxN > 1 ? Math.log(n) / Math.log(maxN) : 0);
-  const wOf = (n, maxN) => Math.min(W_CLS - 1, Math.round(intensity(n, maxN) * (W_CLS - 1)), 2 * wCls(n) + 1);
+  const wOf = (n, maxN) => Math.max(0, Math.min(W_CLS - 1, Math.round(Math.min(1, intensity(n, maxN)) * (W_CLS - 1)), 2 * wCls(n) + 1));
+  let tripRef = 2, tripLoad = null; // reference count; trips in the window relative to average
   const GLOW = DARK ? { to: '#ffffff', k: [0, 0.3, 0.55, 0.8] } : { to: null, k: [0, 0.25, 0.42, 0.6] };
   const glowCache = new Map();
   function glowCol(col, f) {
-    const q = f < 0.6 ? 0 : Math.min(3, 1 + Math.floor(((f - 0.6) / 0.4) * 3));
+    const q = f < 0.7 ? 0 : Math.min(3, 1 + Math.floor(((f - 0.7) / 0.3) * 3));
     if (!q) return col;
     const key = `${col}|${q}`;
     let v = glowCache.get(key);
@@ -1016,16 +1022,21 @@
     // street sections
     let maxN = 1;
     for (const a of agg.values()) if (a[0] > maxN) maxN = a[0];
-    const missing = [], fc = freqCols(), lmax = Math.log(maxN + 1);
+    // Reference: the busiest section as it would be at average traffic for a
+    // window this long. Quiet hours (night) stay faint, rush hours glow more.
+    const avgTrips = S.tripRate ? S.tripRate * S.o.win * 60 : 0;
+    const ref = avgTrips > 0 ? Math.max(2, (maxN * avgTrips) / Math.max(1, sum.arrived)) : maxN;
+    const missing = [], fc = freqCols(), lmax = Math.log(ref + 1);
     for (const [e, a] of agg) {
       const g = EDGE.get(e);
       if (!g) { missing.push(e); continue; }
-      const n = a[0], f = intensity(n, maxN);
+      const n = a[0], f = Math.min(1, intensity(n, ref));
       const col = freq ? fc[Math.min(DIR_STEPS - 1, Math.floor((Math.log(n + 1) / lmax) * DIR_STEPS))]
         : dir ? cols[Math.min(DIR_STEPS - 1, Math.floor((a[1] / n) * DIR_STEPS))] : C.dur[durClass(a[2] / n)];
-      addL(glowCol(col, f), wOf(n, maxN), g);
+      addL(glowCol(col, f), wOf(n, ref), g);
     }
-    tripMax = agg.size ? maxN : 0;
+    tripMax = agg.size ? maxN : 0; tripRef = ref;
+    tripLoad = avgTrips > 0 ? sum.arrived / avgTrips : null;
     const away = [];
     if (S.k.isLive && S.o.away) {
       for (const a of S.away) {
@@ -1588,8 +1599,10 @@
   function widthLegend() {
     if (tripMax < 2) return '';
     const ns = [...new Set([1, Math.round(Math.sqrt(tripMax)), tripMax])];
-    return `<div class="wleg"><span>Dicke</span>${ns.map((n) => { const w = wOf(n, tripMax);
-      return `<i style="height:${(1.4 + 0.95 * w).toFixed(1)}px;opacity:${(0.4 + 0.6 * (w / (W_CLS - 1))).toFixed(2)}"></i><b>${nf.format(n)}</b>`; }).join('')}<span>Fahrten</span></div>`;
+    // numbers only inside <b>, so scrubbing patches them without relayout
+    const load = tripLoad == null ? '' : `<span>Betrieb: <b>${nf.format(Math.round(tripLoad * 100))} %</b> vom Durchschnitt, danach richten sich Dicke und Helligkeit</span>`;
+    return `<div class="wleg"><span>Dicke</span>${ns.map((n) => { const w = wOf(n, tripRef);
+      return `<i style="height:${(1.4 + 0.95 * w).toFixed(1)}px;opacity:${(0.4 + 0.6 * (w / (W_CLS - 1))).toFixed(2)}"></i><b>${nf.format(n)}</b>`; }).join('')}<span>Fahrten</span></div>${load ? `<div class="wleg sub">${load}</div>` : ''}`;
   }
   function tripLegend() {
     if (S.o.color === 'dir') return `<div class="tleg"><span>Start</span><i class="stop s"></i><div class="grad"></div><i class="stop e"></i><span>Ziel</span></div>${widthLegend()}`;
