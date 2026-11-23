@@ -926,8 +926,9 @@
     const away = [];
     if (S.k.isLive && S.o.away) {
       for (const a of S.away) {
+        if (a.since < A) continue; // only departures inside the window, like the trips
         sum.away++;
-        addP(`rgba(0,0,0,0)|${C.dur[durClass((clock - a.since) / 60)]}|5.5|2.2`, a.a);
+        addP(`rgba(0,0,0,0)|${C.dur[durClass((clock - a.since) / 60)]}|4.4|1.6`, a.a);
         away.push(a);
       }
     }
@@ -1491,7 +1492,7 @@
       const s = tripSum;
       const bits = [`<b>${nf.format(s.arrived)}</b> angekommen`];
       if (!S.k.isLive) bits.push(`<b>${nf.format(s.running)}</b> unterwegs`);
-      else if (S.o.away) bits.push(`<b>${nf.format(s.away)}</b> gerade losgefahren`);
+      else if (S.o.away) bits.push(`<b>${nf.format(s.away)}</b> losgefahren, noch unterwegs`);
       parts.push(`<p class="line">Fahrten, letzte ${winText()}: ${bits.join(', ')}. Heute bisher <b>${nf.format(s.today)}</b>.</p><div class="legend">${tripLegend()}</div>`);
     }
     if (S.layers.avail) {
@@ -1986,8 +1987,10 @@
   async function boot() {
     if (booted) return; booted = true;
     await liveReady;
-    const bb = S.live?.meta?.bounds;
-    const view = bb ? [[bb[1], bb[0]], [bb[3], bb[2]]] : KOELN;
+    // start on where most bikes are; a few outliers (Leverkusen, Rösrath) would zoom far out
+    const q = (arr, f) => arr[Math.min(arr.length - 1, Math.max(0, Math.floor(arr.length * f)))];
+    const lats = (S.live?.bikes || []).map((b) => b.lat).sort((x, y) => x - y), lngs = (S.live?.bikes || []).map((b) => b.lng).sort((x, y) => x - y);
+    const view = lats.length > 50 ? [[q(lngs, 0.02), q(lats, 0.02)], [q(lngs, 0.98), q(lats, 0.98)]] : KOELN;
     for (const [k, on] of Object.entries(S.layers)) { const c = $(`#layers [data-layer="${k}"]`); if (c) { c.classList.toggle('on', on); c.setAttribute('aria-pressed', String(on)); } }
     applyVisibility(); renderKarte(true); syncSettings(); updateStatus();
     requestAnimationFrame(() => {
