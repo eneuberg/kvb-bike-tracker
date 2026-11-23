@@ -285,6 +285,8 @@
     if (map.getLayer('stations-t')) map.setPaintProperty('stations-t', 'text-opacity', h ? 0.3 : 1);
     for (const id of ['hist-shift', 'hist-route', 'hist-snap', 'hist-stay', 'hist-stop']) vis(id, h);
     vis('raster-l', L.avail);
+    // with trips on top, the availability colours step back so the lines stay readable
+    if (map.getLayer('raster-l')) map.setPaintProperty('raster-l', 'raster-opacity', L.trips && !h ? 0.5 : 0.9);
     const q = L.avail && S.sel?.type === 'point';
     vis('qpt-fill', q); vis('qpt-line', q); vis('qpt-dot', q);
   }
